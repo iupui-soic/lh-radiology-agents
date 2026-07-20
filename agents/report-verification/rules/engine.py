@@ -18,6 +18,18 @@ import yaml
 from rules.report_body import detect_laterality, parse_report_body
 
 _MISSING = object()
+_VALID_SEVERITIES = ("INFO", "WARN", "FAIL")
+_VALID_OPS = (
+    "exists",
+    "not_exists",
+    "empty",
+    "non_empty",
+    "equals",
+    "not_equals",
+    "contains",
+    "gt",
+    "lt",
+)
 
 
 def enrich_report_body(ctx: dict, narrative: str) -> None:
@@ -45,11 +57,47 @@ class Rule:
 
 def load_yaml_rules(rules_dir: Path) -> list[Rule]:
     rules: list[Rule] = []
+    id_sources: dict[str, Path] = {}
     for path in sorted(rules_dir.glob("*.yaml")):
         data = yaml.safe_load(path.read_text())
+        if not isinstance(data, dict):
+            raise ValueError(f"{path.name}: rule must be a YAML mapping")
+        for key in ("id", "when"):
+            if key not in data:
+                raise ValueError(f"{path.name}: missing required key '{key}'")
+
+        rule_id = data["id"]
+        if not isinstance(rule_id, str) or not rule_id:
+            raise ValueError(f"{path.name}: 'id' must be a non-empty string")
+
+        when = data["when"]
+        if not isinstance(when, dict):
+            raise ValueError(f"{path.name}: 'when' must be a YAML mapping")
+        if "op" not in when:
+            raise ValueError(f"{path.name}: missing required key 'when.op'")
+
+        severity = data.get("severity", "WARN")
+        if severity not in _VALID_SEVERITIES:
+            expected = "|".join(_VALID_SEVERITIES)
+            raise ValueError(
+                f"{path.name}: unknown severity {severity!r} (expected {expected})"
+            )
+
+        op = when["op"]
+        if op not in _VALID_OPS:
+            expected = "|".join(_VALID_OPS)
+            raise ValueError(f"{path.name}: unknown op {op!r} (expected {expected})")
+
+        if rule_id in id_sources:
+            raise ValueError(
+                f"{path.name}: duplicate rule id {rule_id!r} "
+                f"(already defined in {id_sources[rule_id].name})"
+            )
+        id_sources[rule_id] = path
+
         rules.append(Rule(
-            id=data["id"], severity=data.get("severity", "WARN"),
-            when=data.get("when", {}), message=data.get("message", data["id"]),
+            id=rule_id, severity=severity,
+            when=when, message=data.get("message", rule_id),
             location=data.get("location", ""),
         ))
     return rules
