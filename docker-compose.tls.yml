@@ -85,9 +85,14 @@ services:
         condition: service_started
     environment:
       # Read-only fhir2 consumer today (ServiceRequest.requester; the #79 chart write when its
-      # flag ever flips) -- same https route, opt-in withdrawn.
+      # flag ever flips) -- same https route, BOTH plaintext opt-ins withdrawn. The write flag
+      # matters here now that the base file passes it through: an operator shell that exported
+      # FHIR2_ALLOW_INSECURE_WRITE=1 for a plaintext dev run must not carry the waiver into the
+      # hosted stack -- the #30 guard enforces TLS on this hop by construction, like the
+      # orchestrator's block above.
       FHIR2_BASE_URL: https://caddy/openmrs/ws/fhir2/R4
       FHIR2_ALLOW_INSECURE_READ: ""
+      FHIR2_ALLOW_INSECURE_WRITE: ""
       # #79 chart write + signed ack links -- values live in .env (PI sign-off, M4 run-book prereq 3)
       EHR_INBOX_WRITE_ENABLED: ${EHR_INBOX_WRITE_ENABLED:-}
       CRITCOM_ACK_HMAC_SECRET: ${CRITCOM_ACK_HMAC_SECRET:-}

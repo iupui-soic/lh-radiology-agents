@@ -439,11 +439,13 @@ services:
       #
       # #79: the Observation.code concept stamped on the in-EHR critical-result notification
       # (provisioned by presign-concept-bootstrap; drift-guarded in test_presign_concept_drift).
-      # EHR_INBOX_WRITE_ENABLED is deliberately ABSENT: the chart write stays inert until the PI
-      # write-path sign-off is recorded on #79. Flipping it against this in-compose plaintext
-      # fhir2 would also need FHIR2_ALLOW_INSECURE_WRITE=1; a real deployment rides the https
-      # route (#75) instead.
       FHIR2_CRITICAL_NOTIFICATION_CONCEPT: ea215431-5e85-5040-adf0-1da297c154c3
+      # The chart write is an operator opt-in per run, default OFF (empty). The PI write-path
+      # sign-off this waited on is recorded on #79 (2026-07-21). On this in-compose plaintext
+      # fhir2 the write ALSO needs FHIR2_ALLOW_INSECURE_WRITE=1 (the !57 transport guard);
+      # a real deployment rides the https route (#75) and never sets the insecure flag.
+      EHR_INBOX_WRITE_ENABLED: ${EHR_INBOX_WRITE_ENABLED:-}
+      FHIR2_ALLOW_INSECURE_WRITE: ${FHIR2_ALLOW_INSECURE_WRITE:-}
       # Optional Gemini-composed notification prose (composer.py): pass-throughs only, all
       # defaulting to empty (= off) -- the flag is the only switch, and the key NEVER lives in
       # this file (operator environment only; it rides the x-goog-api-key header, no URL/log).
