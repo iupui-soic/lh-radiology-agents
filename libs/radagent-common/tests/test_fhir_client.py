@@ -579,10 +579,13 @@ def test_search_imaging_studies_tolerates_missing_modality_and_date():
 
 # --- search_observations -----------------------------------------------------
 
-def test_search_observations_joins_codes_with_comma():
-    """FHIR search: `code=<a>,<b>` = OR. Joining the whole panel into one query
-    turns N LOINC round-trips into 1 (matters when we ask for creatinine + every
-    eGFR variant we care about for contrast decisions)."""
+def test_search_observations_joins_system_qualified_codes():
+    """FHIR search: `code=<a>,<b>` = OR, one query for the whole panel — and every
+    bare code is LOINC-system-qualified. The live fhir2 build matches ZERO rows on a
+    bare `code=2160-0` even when the concept carries the LOINC reference map, while
+    `http://loinc.org|2160-0` matches all of them (0 vs 16 on the same patient,
+    verified 2026-07-23 on the #68 cohort). A caller passing an already-qualified
+    token must not get it double-prefixed."""
     client = Fhir2Client()
     calls = []
 
@@ -595,10 +598,47 @@ def test_search_observations_joins_codes_with_comma():
             "effectiveDateTime": "2026-06-20"})
 
     client._get = fake_get  # type: ignore[assignment]
-    labs = asyncio.run(client.search_observations("demo-1", ["2160-0", "33914-3", "62238-1"]))
-    assert calls[0] == ("Observation", {"patient": "demo-1", "code": "2160-0,33914-3,62238-1"})
+    labs = asyncio.run(client.search_observations(
+        "demo-1", ["2160-0", "33914-3", "http://snomed.info/sct|62238-1"]))
+    assert calls[0] == ("Observation", {
+        "patient": "demo-1",
+        "code": "http://loinc.org|2160-0,http://loinc.org|33914-3,http://snomed.info/sct|62238-1"})
     assert labs == [{"code": "2160-0", "display": "Creatinine",
                      "value": 1.1, "unit": "mg/dL", "date": "2026-06-20"}]
+
+
+def test_search_medications_falls_back_to_reference_display():
+    """This fhir2 serializes drug orders as `medicationReference` (no inline
+    codeable concept). The lean projection must surface the reference's display so
+    the medicationFlags text fallback can match it — without the fallback a patient
+    on IV heparin scored onAnticoagulant=false (verified live on the #68 cohort).
+    The inline-concept form must still win when present."""
+    client = Fhir2Client()
+
+    async def fake_get(path, params=None):
+        return _bundle(
+            {"resourceType": "MedicationRequest", "id": "m1", "status": "active",
+             "medicationReference": {"reference": "Medication/abc",
+                                     "display": "Heparin Sodium"}},
+            {"resourceType": "MedicationRequest", "id": "m2", "status": "active",
+             "medicationCodeableConcept": {"coding": [
+                 {"system": "http://www.nlm.nih.gov/research/umls/rxnorm",
+                  "code": "6809", "display": "Metformin"}]}},
+            # both forms on one resource: the inline concept must win, the reference
+            # display must NOT clobber it
+            {"resourceType": "MedicationRequest", "id": "m3", "status": "active",
+             "medicationCodeableConcept": {"coding": [
+                 {"system": "http://www.nlm.nih.gov/research/umls/rxnorm",
+                  "code": "1364430", "display": "Apixaban"}]},
+             "medicationReference": {"reference": "Medication/xyz",
+                                     "display": "Eliquis 5mg tab"}},
+        )
+
+    client._get = fake_get  # type: ignore[assignment]
+    meds = asyncio.run(client.search_medications("demo-1"))
+    assert {"code": "", "display": "Heparin Sodium"} in meds
+    assert {"code": "6809", "display": "Metformin"} in meds
+    assert {"code": "1364430", "display": "Apixaban"} in meds
 
 
 def test_search_observations_empty_codes_skips_the_call():

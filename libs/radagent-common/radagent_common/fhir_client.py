@@ -302,9 +302,15 @@ class Fhir2Client:
         """
         if not codes:
             return []
+        # System-qualified tokens, not bare codes: this fhir2 build returns ZERO matches for
+        # `code=2160-0` even when the concept carries the LOINC reference map, while
+        # `code=http://loinc.org|2160-0` returns every row (verified live on the #68 cohort,
+        # 2026-07-23 — 0 vs 16 on the same patient). Same family of live-verified quirks as
+        # the unsupported identifier search and the status-param NPE documented above.
+        qualified = [c if "|" in c else f"http://loinc.org|{c}" for c in codes]
         return [_lean_observation(r) for r in await self._collect(
             "Observation",
-            {"patient": _patient_query(fhir_patient_id), "code": ",".join(codes)})]
+            {"patient": _patient_query(fhir_patient_id), "code": ",".join(qualified)})]
 
     async def search_conditions(self, fhir_patient_id: str) -> list[dict]:
         """GET Condition?patient=...&clinical-status=active — problem list.
@@ -896,14 +902,17 @@ def _medication_is_active(resource: dict) -> bool:
 
 
 def _lean_medication(resource: dict) -> dict:
-    """MedicationRequest -> {code, display} projected from `medicationCodeableConcept`
-    (the inline-code form). A `medicationReference` still needs no follow-up GET for its
-    inline `display` — live fhir2 serves the demo cohort's drug orders exactly that way
-    ("Heparin Sodium" etc.), and dropping it silently blanked every medicationFlag in the
-    M4 arc-4 dry run; the flags' text fallback matches on this display."""
+    """MedicationRequest -> {code, display}. Prefers the inline `medicationCodeableConcept`;
+    falls back to `medicationReference.display` when the concept form is absent. This fhir2
+    serializes drug orders in the REFERENCE form, so without the fallback every med came
+    through with an empty code AND display and no medicationFlag could ever match — verified
+    live on the #68 cohort: a patient on IV heparin + apixaban scored onAnticoagulant=false.
+    The reference's `display` is already present in the search bundle, so this stays a
+    zero-extra-request projection (the code stays empty; the flags matcher's text fallback
+    is exactly the path built for deployments that don't code meds with RxNorm)."""
     med_cc = resource.get("medicationCodeableConcept") or {}
     code, display = _first_coding_value(med_cc)
-    if not display:
+    if not code and not display:
         display = (resource.get("medicationReference") or {}).get("display")
     out: dict = {"code": code or ""}
     if display:
