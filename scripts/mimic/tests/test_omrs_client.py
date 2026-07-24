@@ -17,8 +17,35 @@ HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 
 from omrs_client import (  # noqa: E402
-    OmrsClient, RADIOLOGY_ORDER_TYPE_UUID, RADIOLOGY_CARE_SETTING_UUID,
+    OmrsClient, RADIOLOGY_ORDER_TYPE_UUID, RADIOLOGY_CARE_SETTING_UUID, fhir_instant,
 )
+
+
+# --- fhir_instant (the lab effectiveDateTime normalizer) -------------------
+def test_sql_style_timestamp_gets_the_T_separator():
+    # MIMIC-IV ships `YYYY-MM-DD HH:MM:SS`; HAPI refuses the space ("Expected character 'T' at
+    # index 10"), which silently 400s every lab in a cohort load.
+    assert fhir_instant("2180-08-07 06:15:00") == "2180-08-07T06:15:00"
+
+
+def test_offset_without_a_colon_is_repaired():
+    assert fhir_instant("2180-08-07T06:15:00+0000") == "2180-08-07T06:15:00+00:00"
+
+
+def test_both_defects_in_one_value():
+    assert fhir_instant("2180-08-07 06:15:00+0000") == "2180-08-07T06:15:00+00:00"
+
+
+def test_already_valid_values_are_untouched():
+    for good in ("2180-08-07T06:15:00", "2180-08-07T06:15:00Z", "2180-08-07T06:15:00+00:00"):
+        assert fhir_instant(good) == good
+
+
+def test_non_datetime_values_are_never_rewritten():
+    # a bare date has no time half: nothing to separate, so it must pass through unchanged
+    assert fhir_instant("2180-08-07") == "2180-08-07"
+    assert fhir_instant("") == ""
+    assert fhir_instant(None) == ""
 
 
 # --- ensure_referring_provider (REST get-or-create + cache) ---------------

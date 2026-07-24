@@ -27,10 +27,29 @@ def finalize(c: OmrsClient, accession: str) -> str:
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description="Flip a seeded report to final (rehearsal sign-off cue).")
-    p.add_argument("accession", help="the study accession (MIMIC study_id)")
+    # `finalize` is accepted as an optional leading verb: this module's own docstring,
+    # scripts/mimic/README.md and the run-book's restage step all spell the command
+    # `report_seeder.py finalize <accession>`, and argparse rejected it as an extra positional --
+    # so the documented command failed at exactly the moment a demo needs it. Tolerate both spellings
+    # rather than re-document three places (and any run-book copy already in someone's notes).
+    p.add_argument("verb", nargs="?", default=None, help=argparse.SUPPRESS)
+    p.add_argument("accession", nargs="?", default=None, help="the study accession (MIMIC study_id)")
     args = p.parse_args(argv)
-    rid = finalize(OmrsClient(), args.accession)
-    print(f"finalized DiagnosticReport/{rid} for accession {args.accession} "
+
+    verb, accession = args.verb, args.accession
+    if accession is None and verb == "finalize":
+        # `report_seeder.py finalize` with the accession forgotten: without this guard the
+        # verb would shift into the accession slot and we'd look up a study named "finalize".
+        p.error("an accession is required")
+    if accession is None:          # `report_seeder.py <accession>` -- the verb slot holds it
+        verb, accession = "finalize", verb
+    if accession is None:
+        p.error("an accession is required")
+    if verb != "finalize":
+        p.error(f"unknown command {verb!r} (only 'finalize' is supported)")
+
+    rid = finalize(OmrsClient(), accession)
+    print(f"finalized DiagnosticReport/{rid} for accession {accession} "
           f"-> the RIS poller will detect report_finalized")
     return 0
 

@@ -17,3 +17,13 @@ ingress_state.db-shm
 
 # OpenMRS DB seed snapshots (data, not code; may carry PHI/MIMIC per DUA)
 docker/openmrs/seed/*.sql.gz
+
+# PhysioNet credentialed data (MIMIC-CXR + MIMIC-IV), DUA: NEVER committed. A cohort share
+# bundle (manifest with report text + DICOMs + checksums) belongs on an access-controlled
+# store, never in the repo -- see scripts/mimic/README.md.
+*.dcm
+.claude/files/
+.claude/manifest.json
+.claude/SHA256SUMS
+.claude/SHARE.json
+.claude/README.txt

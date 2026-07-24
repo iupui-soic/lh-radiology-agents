@@ -29,14 +29,19 @@ _log = logging.getLogger("mimic.omrs_client")
 
 
 def fhir_instant(s: str) -> str:
-    """Normalize a datetime to a FHIR-valid instant: this fhir2 rejects a `+0000` offset (wants
-    `+00:00`), and HAPI rejects the space-separated `YYYY-MM-DD HH:MM:SS` the MIMIC-IV extracts
-    use for lab times (wants the ISO `T`) -- every cohort lab Observation 400'd on it until the
-    best-effort load surfaced the swallowed error (found in the M4 arc-4 dry run). Leaves
-    already-valid values (or `Z`) untouched."""
+    """Normalize a datetime to a FHIR-valid instant. Two source shapes need fixing:
+
+    - this fhir2 rejects a `+0000` offset, it wants `+00:00`;
+    - MIMIC-IV timestamps are SQL-style (`2180-08-07 06:15:00`), and every FHIR parser requires
+      the `T` date/time separator -- HAPI refuses the space with
+      `HAPI-1821 ... Expected character 'T' at index 10`, so a whole cohort's labs 400 without this.
+
+    Leaves already-valid values (or `Z`) untouched.
+    """
     s = (s or "").strip()
+    # SQL-style separator -> ISO 8601. Anchored so only a real date+time pair is rewritten.
     if re.match(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}", s):
-        s = s.replace(" ", "T", 1)
+        s = s[:10] + "T" + s[11:]
     m = re.search(r"([+-]\d{2})(\d{2})$", s)
     return s[: m.start()] + m.group(1) + ":" + m.group(2) if m else s
 
