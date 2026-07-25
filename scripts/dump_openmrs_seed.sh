@@ -9,7 +9,11 @@
 set -euo pipefail
 
 MARIADB_CONTAINER="${MARIADB_CONTAINER:-lh-radiology-agents-mariadb-1}"
-OUT="${1:-docker/openmrs/seed/openmrs-seed.sql.gz}"
+# Default OUT is anchored to the repo root (this script's parent), NOT the caller's cwd: invoked
+# from $HOME the relative default silently wrote ~/docker/... while the repo seed stayed stale --
+# a restore would then boot yesterday's DB while the dump log claimed success (found 2026-07-25).
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+OUT="${1:-$REPO_ROOT/docker/openmrs/seed/openmrs-seed.sql.gz}"
 
 if ! docker ps --format '{{.Names}}' | grep -qx "$MARIADB_CONTAINER"; then
   echo "mariadb container '$MARIADB_CONTAINER' is not running; boot the stack first" >&2
