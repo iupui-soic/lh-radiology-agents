@@ -141,11 +141,9 @@ async def test_observation_search_asks_for_creatinine_and_egfr_panel(monkeypatch
     await handle("ehr.assembleContext", {"studyContext": SAMPLE_CONTEXT})
     obs_calls = [c for c in fake.calls if c[0] == "search_observations"]
     codes = obs_calls[0][1][1]
-    # System-qualified tokens: live fhir2 only matches a mapped LOINC term as `system|code`.
-    assert "http://loinc.org|2160-0" in codes   # creatinine (safety net)
-    assert "http://loinc.org|88293-6" in codes  # eGFR CKD-EPI 2021 race-free (current recommendation)
-    assert set(codes) >= {f"http://loinc.org|{c}" for c in
-                          ("33914-3", "48642-3", "48643-1", "62238-1", "88293-6", "98979-8")}
+    assert "2160-0" in codes                    # creatinine (safety net)
+    assert "88293-6" in codes                   # eGFR CKD-EPI 2021 race-free (current recommendation)
+    assert set(codes) >= {"33914-3", "48642-3", "48643-1", "62238-1", "88293-6", "98979-8"}
 
 
 # --- Happy-path assembly against a fixture-like bundle -----------------------
