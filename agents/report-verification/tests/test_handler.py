@@ -33,6 +33,35 @@ async def test_critical_flag_fails_and_requires_review():
     assert any(i["ruleId"] == "critical-comm-required" for i in out["issues"])
 
 
+async def test_critical_flag_with_documented_communication_passes():
+    out = await handle("report.verify", {
+        "studyContext": SAMPLE_CONTEXT,
+        "impression": {"impressionText": "Tiny right apical pneumothorax.",
+                       "criticalFlags": [{"label": "pneumothorax", "severity": "critical"}],
+                       "recommendations": []},
+        "report": {"conclusion": "FINDINGS:\n\nTiny right apical pneumothorax.\n\n"
+                                 "IMPRESSION:\n\nTiny right apical pneumothorax.\n\n"
+                                 "NOTIFICATION: Findings were relayed by Dr. A to Dr. B "
+                                 "by phone at 15:44 (0 minutes after discovery)."},
+    })
+    validate_skill_output("report.verify", out)
+    assert not any(i["ruleId"] == "critical-comm-required" for i in out["issues"])
+
+
+async def test_critical_flag_without_documented_communication_fails():
+    out = await handle("report.verify", {
+        "studyContext": SAMPLE_CONTEXT,
+        "impression": {"impressionText": "Large left pneumothorax.",
+                       "criticalFlags": [{"label": "pneumothorax", "severity": "critical"}],
+                       "recommendations": []},
+        "report": {"conclusion": "FINDINGS:\n\nLarge left pneumothorax.\n\n"
+                                 "IMPRESSION:\n\nLarge left pneumothorax."},
+    })
+    validate_skill_output("report.verify", out)
+    assert out["verificationStatus"] == "FAIL"
+    assert any(i["ruleId"] == "critical-comm-required" for i in out["issues"])
+
+
 # --- report-body parsing feeds the PI rules (#22). An inline `conclusion` stands in for the fhir2
 #     fetch so these stay hermetic (the handler prefers it over a network read). -----------------
 
