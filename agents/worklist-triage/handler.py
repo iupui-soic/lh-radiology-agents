@@ -42,6 +42,16 @@ _URGENT_CUTOFF = 65
 # routine outpatient study cannot tie with a study whose priority is unknown.
 _PRIORITY_WEIGHTS = {"stat": 30, "asap": 25, "urgent": 15, "routine": -5}
 
+# Exact ICD-10 codes that map to a STAT-worthy read where the 3-char category is too
+# broad to promote wholesale. J95 is "intraoperative and postprocedural complications of
+# the respiratory system" — mostly chronic (tracheostomy complications, post-procedural
+# respiratory failure histories), so J95-wide would over-triage; J95.811 specifically is
+# postprocedural pneumothorax, clinically the same emergency as J93* (MIMIC codes
+# chest-tube/post-VATS pneumothorax this way — PI-requested, M4 dry-run finding).
+_STAT_REASON_CODES: dict[str, str] = {
+    "J95.811": "postprocedural pneumothorax",
+}
+
 # ICD-10 prefixes (first 3 chars, uppercased) that map to a STAT-worthy read.
 # Life- or limb-threatening; the radiologist wants these at the top of the list.
 _STAT_REASON_PREFIXES: dict[str, str] = {
@@ -134,6 +144,17 @@ def _reason_code_signals(order: dict) -> list[tuple[int, str]]:
         if not isinstance(code, str):
             continue
         prefix = code.split(".", 1)[0][:3].upper()
+        exact = code.strip().upper()
+        # Exact-code hits dedupe on the exact code, not the category, so a sibling code
+        # from the same (unpromoted) category — e.g. J95.1 before J95.811 — can never
+        # swallow the promotion; a repeated J95.811 still scores once.
+        if exact in _STAT_REASON_CODES:
+            if exact not in seen:
+                seen.add(exact)
+                hits.append((_STAT_REASON_WEIGHT,
+                             f"reason {code} -> {_STAT_REASON_CODES[exact]} (STAT code, "
+                             f"+{_STAT_REASON_WEIGHT})"))
+            continue
         if prefix in seen:
             continue
         seen.add(prefix)

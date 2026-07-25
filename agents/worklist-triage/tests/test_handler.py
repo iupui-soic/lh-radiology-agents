@@ -104,6 +104,23 @@ class TestReasonCodeSignals:
     def test_unknown_code_ignored(self):
         assert _reason_code_signals({"reasonCode": ["Z99.999"]}) == []
 
+    def test_exact_stat_code_hit(self):
+        """J95.811 (postprocedural pneumothorax) promotes exactly, not J95-wide."""
+        signals = _reason_code_signals({"reasonCode": ["J95.811"]})
+        assert len(signals) == 1
+        assert signals[0][0] == 25 and "postprocedural pneumothorax" in signals[0][1]
+
+    def test_exact_stat_code_siblings_not_promoted(self):
+        """Other J95.* codes stay unscored -- the category is too broad to promote."""
+        assert _reason_code_signals({"reasonCode": ["J95.1"]}) == []
+
+    def test_exact_stat_code_survives_category_sibling(self):
+        """A sibling J95.* earlier in the list must not swallow the J95.811 promotion,
+        and the pair must not stack twice."""
+        signals = _reason_code_signals({"reasonCode": ["J95.1", "J95.811", "J95.811"]})
+        assert len(signals) == 1
+        assert signals[0][0] == 25
+
     def test_multiple_categories_stack(self):
         """MI + shock is more urgent than either alone."""
         signals = _reason_code_signals({"reasonCode": ["I21.9", "R57.0"]})
