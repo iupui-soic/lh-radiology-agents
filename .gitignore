@@ -26,3 +26,6 @@ manifest.json
 SHA256SUMS
 SHARE.json
 .claude/settings.local.json
+
+# Fetched third-party RIS vendor assets (docker/caddy/fetch-radiology-vendor.sh), not source
+docker/caddy/radiology-vendor/
