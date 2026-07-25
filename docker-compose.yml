@@ -489,6 +489,27 @@ services:
         condition: service_started
     restart: "no"
 
+  # RIS sign -> fhir2 bridge (M4 workaround, #70): the o3 radiology module's
+  # emitFhirDiagnosticReport throws ServiceNotFoundException(FhirDiagnosticReportService) on
+  # every sign and swallows it, so a radiologist's Complete never reaches fhir2 or the RIS
+  # poller and every read parks at AWAITING_SIGNOFF forever. This watcher mirrors COMPLETED
+  # radiology_report rows into the study's seeded DiagnosticReport (authored body + status
+  # final) -- identical downstream effect to the missing emit. Remove when the module fix
+  # lands in the o3 sibling repo. Plaintext in-compose fhir2 hop, same posture as the ETL.
+  ris-sign-bridge:
+    build: { context: scripts/mimic, dockerfile: Dockerfile }
+    command: python3 ris_sign_bridge.py
+    environment:
+      FHIR2_BASE_URL: http://openmrs:8080/openmrs/ws/fhir2/R4
+      FHIR2_BASIC_USER: admin
+      FHIR2_BASIC_PASS: Admin123
+    depends_on:
+      mariadb:
+        condition: service_started
+      openmrs:
+        condition: service_started
+    restart: unless-stopped
+
 volumes:
   mariadb-data:
   orthanc-db:

@@ -16,7 +16,7 @@ global `POSITIVE_THRESHOLD = 0.5`, the model's own nominal operating point. Tuni
 threshold is a clinical decision that needs population data we do not have (the #64 corpus
 argument), so it is deliberately untuned.
 
-CPU inference completes in well under a second; the demo host needs no GPU.
+CPU inference completes in well under a second; the demo host needs no GPU.is it 
 
 ## Where the weights live
 

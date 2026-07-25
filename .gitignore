@@ -25,3 +25,4 @@ docker/openmrs/seed/*.sql.gz
 manifest.json
 SHA256SUMS
 SHARE.json
+.claude/settings.local.json
