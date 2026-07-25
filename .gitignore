@@ -22,8 +22,6 @@ docker/openmrs/seed/*.sql.gz
 # bundle (manifest with report text + DICOMs + checksums) belongs on an access-controlled
 # store, never in the repo -- see scripts/mimic/README.md.
 *.dcm
-.claude/files/
-.claude/manifest.json
-.claude/SHA256SUMS
-.claude/SHARE.json
-.claude/README.txt
+manifest.json
+SHA256SUMS
+SHARE.json
