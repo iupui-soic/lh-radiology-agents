@@ -37,6 +37,12 @@ origin the #75 Caddy overlay serves. Nothing else is reachable off-box.
    password is known; the ack/override phone is on wifi that can reach the demo origin.
 5. OpenMRS seed captured once (`scripts/dump_openmrs_seed.sh`) so recovery never costs the
    16-minute boot.
+5a. Radiology-module vendor assets fetched once per host (`docker/caddy/fetch-radiology-vendor.sh`,
+   network required): the omod ships without them and every RIS page dies on "jQuery is not
+   defined" until Caddy can serve them (#75 overlay; real fix is the o3 omod build).
+5b. `ris-sign-bridge` is up (`docker compose ps ris-sign-bridge`): the module's sign emit is
+   broken (ServiceNotFoundException, swallowed), so without the bridge a signed report never
+   reaches fhir2/the poller and every read parks at the gate (workaround for #70; real fix o3).
 6. Smoke: `https://demo.example.org/` → 401 without the proxy login; `/reading` lists the
    cohort after login; one seeded `report_seeder.py finalize` releases a test study end to end.
 
