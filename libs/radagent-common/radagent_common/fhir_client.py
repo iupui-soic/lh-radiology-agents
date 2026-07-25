@@ -822,11 +822,26 @@ def _lean_imaging_study(resource: dict) -> dict:
     return out
 
 
+_LOINC_SYSTEM = "http://loinc.org"
+
+
 def _lean_observation(resource: dict) -> dict:
     """Observation -> {code, display, value?, unit?, date?}. Handles `valueQuantity` and
     `valueString` — the two commonest lab shapes. Missing pieces are simply omitted so
-    schema `required: ["code"]` is met and optionals only appear when known."""
-    code, display = _first_coding_value(resource.get("code") or {})
+    schema `required: ["code"]` is met and optionals only appear when known.
+
+    Prefers a LOINC-system coding when the concept carries one: live fhir2 lists the local
+    concept uuid first and the mapped LOINC second, and downstream matching (the EHR
+    assistant's eGFR panel) compares against LOINC — the first-coding pick handed it the
+    uuid instead (M4 arc-4 dry run)."""
+    cc = resource.get("code") or {}
+    code = display = None
+    for coding in cc.get("coding", []) or []:
+        if isinstance(coding, dict) and coding.get("system") == _LOINC_SYSTEM and coding.get("code"):
+            code, display = coding["code"], coding.get("display") or cc.get("text")
+            break
+    if not code:
+        code, display = _first_coding_value(cc)
     out: dict = {"code": code or ""}
     if display:
         out["display"] = display
@@ -882,11 +897,14 @@ def _medication_is_active(resource: dict) -> bool:
 
 def _lean_medication(resource: dict) -> dict:
     """MedicationRequest -> {code, display} projected from `medicationCodeableConcept`
-    (the inline-code form; a `medicationReference` would need a follow-up GET which we
-    do not do — those come through with an empty code and are filtered downstream by
-    the medicationFlags matcher when nothing matches)."""
+    (the inline-code form). A `medicationReference` still needs no follow-up GET for its
+    inline `display` — live fhir2 serves the demo cohort's drug orders exactly that way
+    ("Heparin Sodium" etc.), and dropping it silently blanked every medicationFlag in the
+    M4 arc-4 dry run; the flags' text fallback matches on this display."""
     med_cc = resource.get("medicationCodeableConcept") or {}
     code, display = _first_coding_value(med_cc)
+    if not display:
+        display = (resource.get("medicationReference") or {}).get("display")
     out: dict = {"code": code or ""}
     if display:
         out["display"] = display

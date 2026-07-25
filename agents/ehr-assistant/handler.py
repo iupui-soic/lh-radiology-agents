@@ -51,8 +51,12 @@ _EGFR_LOINCS = [
 ]
 _CREATININE_LOINC = "2160-0"
 
-# LOINCs pulled together in a single Observation search.
-_LAB_LOINCS = [_CREATININE_LOINC, *_EGFR_LOINCS]
+# LOINCs pulled together in a single Observation search. System-qualified (`system|code`):
+# live fhir2 matches a concept's mapped LOINC reference term ONLY on the qualified token --
+# a bare `code=2160-0` returns nothing against it (verified on the o3 build in the M4 arc-4
+# dry run), which silently emptied relevantLabs for the whole cohort.
+_LOINC_SYSTEM = "http://loinc.org"
+_LAB_LOINCS = [f"{_LOINC_SYSTEM}|{c}" for c in (_CREATININE_LOINC, *_EGFR_LOINCS)]
 
 # --- Medication flag rules ---------------------------------------------------
 # Each rule = (flag name, RxNorm ingredient codes, text-fallback substrings).
