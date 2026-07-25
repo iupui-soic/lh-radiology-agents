@@ -45,6 +45,7 @@ services:
       DEMO_PROXY_PASS_HASH: ${DEMO_PROXY_PASS_HASH:-$$2a$$14$$/PRg2Yczxuv8H9vj7zIc1ehMaac9ic3mDkS5z2MYojV1LG0JD.tjq}
     volumes:
       - ./docker/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./docker/caddy/radiology-vendor:/srv/radiology-vendor:ro
       - caddy-data:/data
       - caddy-config:/config
     # NOT the orchestrator: the agents depend on caddy (for the CA root their SSL_CERT_FILE
@@ -87,6 +88,10 @@ services:
       # flag ever flips) -- same https route, opt-in withdrawn.
       FHIR2_BASE_URL: https://caddy/openmrs/ws/fhir2/R4
       FHIR2_ALLOW_INSECURE_READ: ""
+      # #79 chart write + signed ack links -- values live in .env (PI sign-off, M4 run-book prereq 3)
+      EHR_INBOX_WRITE_ENABLED: ${EHR_INBOX_WRITE_ENABLED:-}
+      CRITCOM_ACK_HMAC_SECRET: ${CRITCOM_ACK_HMAC_SECRET:-}
+      CRITCOM_ACK_BASE_URL: ${CRITCOM_ACK_BASE_URL:-}
       SSL_CERT_FILE: /caddy-pki/caddy/pki/authorities/local/root.crt
     volumes:
       - caddy-data:/caddy-pki:ro
@@ -128,6 +133,9 @@ services:
     ports: !override ["127.0.0.1:8105:8105"]
   worklist-api:
     ports: !override ["127.0.0.1:8107:8107"]
+    environment:
+      # ack-link verify side of CRITCOM_ACK_HMAC_SECRET (fails closed when empty)
+      CRITCOM_ACK_HMAC_SECRET: ${CRITCOM_ACK_HMAC_SECRET:-}
   jaeger:
     ports: !override ["127.0.0.1:16686:16686", "127.0.0.1:4318:4318"]
 

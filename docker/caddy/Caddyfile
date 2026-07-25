@@ -17,6 +17,17 @@
 #                        override it on a reachable host.
 
 (showcase_routes) {
+	# The radiology module's vendor assets (jquery, datatables, moment, ...) are MISSING from
+	# this omod build -- the module 404s them and every RIS dashboard page dies on
+	# "jQuery is not defined" (found in the M4 recording dry run). Until the omod bundles them
+	# again, serve pinned copies from the overlay (docker/caddy/radiology-vendor, mounted at
+	# /srv/radiology-vendor). Must precede the /openmrs/* handle.
+	handle /openmrs/moduleResources/radiology/vendor/* {
+		uri strip_prefix /openmrs/moduleResources/radiology/vendor
+		root * /srv/radiology-vendor
+		file_server
+	}
+
 	# RIS + fhir2. Deliberately NOT behind the proxy login: OpenMRS enforces its own accounts
 	# (radiologists sign under their own identity, #75 item 4), and the agents' fhir2 calls on
 	# this same route authenticate with FHIR2_BASIC_* against fhir2 itself. Stacking the proxy
@@ -31,6 +42,17 @@
 	# /signoff/... paths it serves in-cluster.
 	handle_path /ingress/* {
 		reverse_proxy orchestrator:8090
+	}
+
+	# Critical-result ack surface (#79): like the override, tapped from a paged clinician's
+	# PHONE, so it cannot sit behind the proxy login -- Basic carries ONE credential and the
+	# ack endpoint needs it to be the tapper's own OpenMRS account (that is the attribution).
+	# Safe outside the proxy login: the HMAC sig gate 403s any forged/enumerated link before
+	# a password prompt is ever offered. Same strip as OHIF's nginx fan-out, so worklist-api
+	# sees the /ack/... path it serves in-cluster.
+	handle /reading-api/ack/* {
+		uri strip_prefix /reading-api
+		reverse_proxy worklist-api:8107
 	}
 
 	# Everything else is the viewer origin. OHIF's nginx already fans out same-origin to
