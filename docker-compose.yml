@@ -141,7 +141,7 @@ services:
       ORCH_WEBHOOK_URL: http://orchestrator:8090/webhooks/orthanc
     volumes:
       - orthanc-db:/var/lib/orthanc/db
-      - ./docker/orthanc/orthanc.json:/etc/orthanc/lh-radiology.json:ro
+      - ./docker/orthanc/orthanc.json:/etc/orthanc/orthanc.json:ro
       # The plugin file is mounted read-only; edits happen via git + `docker compose restart orthanc`.
       - ./integrations/orthanc-plugin/orthanc_stable_study.py:/etc/orthanc/orthanc_stable_study.py:ro
     restart: unless-stopped
@@ -546,6 +546,24 @@ services:
       # env without editing this file. Dev default stays admin.
       FHIR2_BASIC_USER: ${FHIR2_BASIC_USER:-admin}
       FHIR2_BASIC_PASS: ${FHIR2_BASIC_PASS:-Admin123}
+    depends_on:
+      mariadb:
+        condition: service_started
+      openmrs:
+        condition: service_started
+    restart: unless-stopped
+
+  # Reverse of ris-sign-bridge: fhir2 -> radiology_report. Polls fhir2 for
+  # AI-authored preliminary DiagnosticReports (concept-stamped) and writes their
+  # `conclusion` into the module's `radiology_report.report_body` so the Report
+  # form's Diagnosis field is pre-populated when the radiologist opens it.
+  ris-presign-bridge:
+    build: { context: scripts/mimic, dockerfile: Dockerfile }
+    command: python3 ris_presign_bridge.py
+    environment:
+      FHIR2_BASE_URL: http://openmrs:8080/openmrs/ws/fhir2/R4
+      FHIR2_BASIC_USER: admin
+      FHIR2_BASIC_PASS: Admin123
     depends_on:
       mariadb:
         condition: service_started
