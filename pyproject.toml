@@ -7,6 +7,7 @@ name = "lh-radiology-agents"
 version = "0.3.0"
 description = "Multi-agent radiology system on LibreHealth Radiology (A2A agents + Temporal orchestrator)."
 requires-python = ">=3.11"
+license = { text = "MPL-2.0" }
 dependencies = [
   # a2a-sdk is pinned once — in radagent-common's `a2a` extra — so it can't drift across files:
   "radagent-common[a2a]",    # -> a2a-sdk[http-server]==1.0.3

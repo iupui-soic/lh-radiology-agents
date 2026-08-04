@@ -4,6 +4,7 @@ title: "LH-Radiology Multi-Agent System"
 type: software
 version: 0.3.0
 date-released: 2026-07-15
+license: MPL-2.0
 repository-code: "https://gitlab.com/librehealth/radiology/lh-radiology-agents"
 abstract: >-
   Five A2A agents and a Temporal orchestrator that drive a radiology study from

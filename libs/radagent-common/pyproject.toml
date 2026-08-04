@@ -7,6 +7,9 @@ name = "radagent-common"
 version = "0.1.0"
 description = "Shared library for LibreHealth Radiology multi-agent system: StudyContext model, A2A factory, fhir2/Orthanc clients, validation, tracing."
 requires-python = ">=3.11"
+# Table form rather than a bare SPDX string: PEP 639's `license = "MPL-2.0"` needs
+# setuptools>=77, and this build-system pins only >=68.
+license = { text = "MPL-2.0" }
 dependencies = [
   "pydantic>=2.6",
   "jsonschema>=4.21",
