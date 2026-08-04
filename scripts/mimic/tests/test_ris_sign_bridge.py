@@ -8,10 +8,12 @@ whole post-sign pipeline hangs off:
     forges a human sign. Pinned with the draft FIRST in the bundle, the order that hides the
     bug on today's stack (which happens to serve oldest-first).
   - #90: a transient resolve miss (ETL not finished, fhir2 hiccup) permanently blacklisting the
-    report_id in-memory -- the sign was silently lost until a container restart.
+    report_id in-memory -- the sign was silently lost until a container restart. Retries are
+    forever; the log re-fires every MISS_LOG_EVERY attempts so a stuck sign stays visible.
   - #91: the fhir2 1024-char conclusion cap (live-bisected: 1024 -> 200, 1025 -> 422) applied
-    SILENTLY -- Verification then judges an amputated body. The cap is real and stays; the cut
-    must be marked in-band and logged.
+    SILENTLY and from the WRONG END. The clamp is now the seed path's (report_text, shared with
+    load_cohort): keep FINDINGS onward, else the tail where IMPRESSION lives (#42) -- and the
+    bridge prefixes an in-band marker and logs the cut.
 """
 import sys
 import pathlib
@@ -21,6 +23,7 @@ sys.path.insert(0, str(HERE.parent))
 
 import ris_sign_bridge as bridge  # noqa: E402
 from omrs_client import OmrsClient  # noqa: E402
+from report_text import FHIR2_CONCLUSION_MAX, clamp_conclusion  # noqa: E402
 
 
 # --- fakes -----------------------------------------------------------------
@@ -55,16 +58,26 @@ def _rows(monkeypatch, rows):
 ROW = (7, "<p>Pneumothorax.</p>", "s123", "Jake", "Doctor")
 
 
+# --- module import stays collectable in the pymysql-less CI lane ------------
+
+def test_no_module_scope_pymysql_import():
+    # The mimic-etl-tests lane deliberately installs no pymysql (DB-path-only dependency);
+    # a module-scope import interrupted collection of the WHOLE suite. The dep must load
+    # lazily, inside connect() -- same treatment omrs_client gives it.
+    assert "pymysql" not in bridge.__dict__, \
+        "pymysql leaked back to module scope; the CI lane cannot collect this module"
+
+
 # --- #90: a resolve miss is retried, not blacklisted -----------------------
 
 def test_transient_order_miss_is_retried_and_bridges_on_recovery(monkeypatch, capsys):
     c = _FakeClient(order=None, fhir_id="dr-1")
-    bridged, missing = set(), set()
+    bridged, missing = set(), {}
     _rows(monkeypatch, [ROW])
 
     bridge.bridge_cycle(None, c, bridged, missing)          # miss: order not resolvable yet
     assert 7 not in bridged, "a miss must not join the done-set (the old permanent skip, #90)"
-    assert 7 in missing
+    assert missing[7] == 1
 
     c.order = {"patient_uuid": "p", "order_uuid": "o"}      # the ETL catches up
     bridge.bridge_cycle(None, c, bridged, missing)
@@ -74,63 +87,100 @@ def test_transient_order_miss_is_retried_and_bridges_on_recovery(monkeypatch, ca
 
 def test_seeded_report_miss_is_retried_too(monkeypatch):
     c = _FakeClient(order={"patient_uuid": "p", "order_uuid": "o"}, fhir_id=None)
-    bridged, missing = set(), set()
+    bridged, missing = set(), {}
     _rows(monkeypatch, [ROW])
     bridge.bridge_cycle(None, c, bridged, missing)
-    assert 7 not in bridged and 7 in missing
+    assert 7 not in bridged and missing[7] == 1
     c.fhir_id = "dr-1"
     bridge.bridge_cycle(None, c, bridged, missing)
     assert 7 in bridged and c.put_calls
 
 
-def test_miss_is_logged_once_not_every_cycle(monkeypatch, capsys):
-    # The old code logged the miss each poll; with retry-forever that would be one line per
-    # 10s per stuck report. Log on the first miss only.
+def test_stuck_miss_relogs_on_the_nth_attempt(monkeypatch, capsys):
+    # One line ever is functionally silence for the bridge's highest-consequence state (a lost
+    # human sign); one line per 10s poll is spam. Pin the compromise: first attempt and every
+    # MISS_LOG_EVERY-th after it.
     c = _FakeClient(order=None)
-    bridged, missing = set(), set()
+    bridged, missing = set(), {}
     _rows(monkeypatch, [ROW])
-    for _ in range(3):
+    for _ in range(bridge.MISS_LOG_EVERY + 1):
         bridge.bridge_cycle(None, c, bridged, missing)
-    assert capsys.readouterr().out.count("no order for s123") == 1
+    out = capsys.readouterr().out
+    assert out.count("no order for s123") == 2, "expected attempt 1 and attempt MISS_LOG_EVERY"
+    assert "(attempt 1)" in out and f"(attempt {bridge.MISS_LOG_EVERY})" in out
 
 
 def test_already_final_report_is_done_without_a_put(monkeypatch):
     c = _FakeClient(order={"patient_uuid": "p", "order_uuid": "o"}, fhir_id="dr-1",
                     report={"status": "final"})
-    bridged, missing = set(), set()
+    bridged, missing = set(), {}
     _rows(monkeypatch, [ROW])
     bridge.bridge_cycle(None, c, bridged, missing)
     assert 7 in bridged and not c.put_calls
 
 
-# --- #91: the fhir2 cap is applied loudly and marked ------------------------
+# --- #91: the shared clamp keeps the reading end, marked and logged ---------
 
-def test_short_body_is_untouched(capsys):
-    assert bridge.capped_conclusion(1, "x" * 1024) == "x" * 1024
-    assert "truncating" not in capsys.readouterr().out
-
-
-def test_long_body_is_capped_marked_and_logged(capsys):
-    out = bridge.capped_conclusion(1, "x" * 3000)
-    assert len(out) == bridge.FHIR2_CONCLUSION_MAX, "must fit fhir2's hard cap exactly"
-    assert out.endswith(bridge.TRUNCATION_MARKER), "the cut must be visible in-band (#91)"
-    assert "3000 chars" in capsys.readouterr().out
+def test_clamp_is_pure_and_reports_truncation(capsys):
+    text, cut = clamp_conclusion("x" * 2000)
+    assert cut is True and len(text) == FHIR2_CONCLUSION_MAX
+    assert capsys.readouterr().out == "", "clamp_conclusion must not log; the caller owns that"
 
 
-def test_boundary_1025_is_capped(capsys):
-    out = bridge.capped_conclusion(1, "x" * 1025)
-    assert len(out) <= bridge.FHIR2_CONCLUSION_MAX
-    assert out.endswith(bridge.TRUNCATION_MARKER)
+def test_clamp_short_text_untouched():
+    assert clamp_conclusion("FINDINGS: ok. IMPRESSION: ok.") == ("FINDINGS: ok. IMPRESSION: ok.", False)
 
 
-def test_bridge_writes_the_capped_body(monkeypatch):
+def test_reserve_is_charged_only_when_truncating():
+    # A 1000-char body fits the 1024 cap raw; reserving marker room must not cut it anyway.
+    text, cut = clamp_conclusion("y" * 1000, reserve=89)
+    assert (text, cut) == ("y" * 1000, False)
+    # Over the cap, the reserve comes out of the kept budget so marker + text fit the column.
+    text, cut = clamp_conclusion("y" * 1025, reserve=89)
+    assert cut is True and len(text) == FHIR2_CONCLUSION_MAX - 89
+
+
+def test_clamp_drops_preamble_keeps_findings_and_impression():
+    preamble = "WET READ: prelim note. " * 50   # pushes the total past the 1024 cap
+    body = "FINDINGS: effusion. IMPRESSION: effusion."
+    text, cut = clamp_conclusion(preamble + body)
+    assert (text, cut) == (body, True), "FINDINGS onward fits -- preamble goes, IMPRESSION stays"
+
+
+def test_clamp_keeps_tail_when_findings_alone_too_long():
+    text = "FINDINGS: " + "z" * 2000 + " IMPRESSION: pneumothorax."
+    out, cut = clamp_conclusion(text)
+    assert cut is True and out.endswith("IMPRESSION: pneumothorax.")
+    assert len(out) == FHIR2_CONCLUSION_MAX
+
+
+def test_bridge_writes_marker_prefixed_tail(monkeypatch):
     c = _FakeClient(order={"patient_uuid": "p", "order_uuid": "o"}, fhir_id="dr-1")
-    _rows(monkeypatch, [(7, "y" * 5000, "s123", "Jake", "Doctor")])
-    bridge.bridge_cycle(None, c, set(), set())
+    long_body = "HISTORY: dyspnea. " * 100 + "FINDINGS: " + "w" * 1500 + " IMPRESSION: large pneumothorax."
+    _rows(monkeypatch, [(7, long_body, "s123", "Jake", "Doctor")])
+    bridge.bridge_cycle(None, c, set(), {})
     (_, body), = c.put_calls
-    assert len(body["conclusion"]) == bridge.FHIR2_CONCLUSION_MAX
-    assert body["conclusion"].endswith(bridge.TRUNCATION_MARKER)
     assert body["status"] == "final"
+    assert body["conclusion"].startswith(bridge.TRUNCATION_MARKER), "the cut must be visible in-band (#91)"
+    assert body["conclusion"].endswith("IMPRESSION: large pneumothorax."), \
+        "the clamp must keep the reading end -- IMPRESSION is what verification parses"
+    assert len(body["conclusion"]) <= FHIR2_CONCLUSION_MAX
+
+
+def test_bridge_logs_the_cut(monkeypatch, capsys):
+    c = _FakeClient(order={"patient_uuid": "p", "order_uuid": "o"}, fhir_id="dr-1")
+    _rows(monkeypatch, [(7, "v" * 3000, "s123", "Jake", "Doctor")])
+    bridge.bridge_cycle(None, c, set(), {})
+    assert "caps conclusion" in capsys.readouterr().out
+
+
+def test_bridge_short_body_gets_no_marker(monkeypatch):
+    c = _FakeClient(order={"patient_uuid": "p", "order_uuid": "o"}, fhir_id="dr-1")
+    _rows(monkeypatch, [ROW])
+    bridge.bridge_cycle(None, c, set(), {})
+    (_, body), = c.put_calls
+    assert bridge.TRUNCATION_MARKER not in body["conclusion"]
+    assert body["conclusion"] == "Pneumothorax."
 
 
 # --- #89: the AI pre-sign draft is never the sign target --------------------

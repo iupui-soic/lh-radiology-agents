@@ -28,20 +28,14 @@ DEFAULT_WHEN = os.environ.get("MIMIC_DEFAULT_WHEN", "2026-01-01T09:00:00+00:00")
 
 # fhir2 validates DiagnosticReport.conclusion against a 1,024-char column; anything longer is a
 # 422 and the whole seed is lost. 18/100 real MIMIC reports exceed it (wet-read preambles).
-FHIR2_CONCLUSION_MAX = 1024
+# The direction logic (keep FINDINGS onward, else the IMPRESSION tail) moved to report_text so
+# the ris-sign-bridge clamps the SAME way; this shim keeps the seed path's plain-string
+# signature so its callers and tests are untouched.
+from report_text import FHIR2_CONCLUSION_MAX, clamp_conclusion as _clamp_conclusion
 
 
 def clamp_conclusion(text: str, limit: int = FHIR2_CONCLUSION_MAX) -> str:
-    """Fit the report into fhir2's conclusion column without losing the sections the pipeline
-    parses. Prefer dropping the preamble (wet read, history) by starting at FINDINGS; fall back
-    to keeping the tail, because MIMIC reports end with IMPRESSION and verification (#42) and
-    the flip-to-final rehearsal both need that section present."""
-    if len(text) <= limit:
-        return text
-    i = text.find("FINDINGS")
-    if i != -1 and len(text) - i <= limit:
-        return text[i:]
-    return text[-limit:]
+    return _clamp_conclusion(text, limit)[0]
 
 
 def load_study(c: OmrsClient, s: CohortStudy, concept_uuid: str, when_iso: str = DEFAULT_WHEN,
