@@ -564,6 +564,12 @@ services:
       FHIR2_BASE_URL: http://openmrs:8080/openmrs/ws/fhir2/R4
       FHIR2_BASIC_USER: admin
       FHIR2_BASIC_PASS: Admin123
+      # Kept in lockstep with the orchestrator's FHIR2_PRESIGN_REPORT_CONCEPT
+      # (line ~319) per @sunbiz's !107 review. If a deployment moves the AI
+      # concept there, this bridge follows via the same knob -- otherwise the
+      # bridge would silently stop matching AI DiagnosticReports and the
+      # Diagnosis field would come up empty with no error to see why.
+      FHIR2_PRESIGN_REPORT_CONCEPT: e3641471-3f25-57b4-ab27-a3ebc66e481e
     depends_on:
       mariadb:
         condition: service_started

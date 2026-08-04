@@ -22,6 +22,8 @@ Safety rails:
   draft. The radiologist's own work is authoritative.
 - Only touch rows whose fhir2 DiagnosticReport carries OUR concept stamp -- a
   radiologist's own preliminary draft (different code) is left alone.
+- Written rows are stamped to a dedicated service user (`ai-presign-bridge`), not
+  to admin -- the audit trail says who wrote the draft.
 
 Best-effort: transient fhir2/db errors are logged and the loop continues. The
 radiologist can always write the report by hand; a missing draft is a graceful
@@ -38,13 +40,30 @@ from omrs_client import OmrsClient
 
 POLL_SECONDS = int(os.environ.get("BRIDGE_POLL_SECONDS", "10"))
 
-# The AI authorship stamp -- must match `FHIR2_PRESIGN_REPORT_CONCEPT` in
-# libs/radagent-common/radagent_common/fhir_client.py and the UUID provisioned by
-# docker/openmrs/bootstrap_presign_concept.py. A DiagnosticReport without this exact
-# concept code is a human draft (or someone else's system) and is NOT ours to touch.
-AI_PRESIGN_CONCEPT_UUID = os.environ.get(
-    "AI_PRESIGN_CONCEPT_UUID",
+# The AI authorship stamp -- must match the canonical concept configured on the
+# orchestrator via ``FHIR2_PRESIGN_REPORT_CONCEPT`` (see
+# libs/radagent-common/radagent_common/fhir_client.py:_presign_report_concept()) and
+# the UUID provisioned by docker/openmrs/bootstrap_presign_concept.py. A
+# DiagnosticReport without this exact concept code is a human draft (or someone
+# else's system) and is NOT ours to touch.
+#
+# Env var name kept in lockstep with the orchestrator per !107 review: if a
+# deployment moves the concept there, the bridge follows via the same knob.
+FHIR2_PRESIGN_REPORT_CONCEPT = os.environ.get(
+    "FHIR2_PRESIGN_REPORT_CONCEPT",
     "e3641471-3f25-57b4-ab27-a3ebc66e481e",
+)
+
+# Service user for audit stamping (!107 review). The `radiology_report` row's
+# `creator`, `changed_by` (and the underlying person's `creator`) all point at this
+# user's id so a bridge-written draft is distinguishable from an admin-written one
+# in the audit trail. Provisioned on first bridge start if missing; the row itself
+# is created as a person + person_name + users triple, unretired, no roles assigned
+# (this account is never intended for interactive login, only as an authorship
+# stamp). Username is overridable via env so a deployment can point at an existing
+# service user rather than have the bridge auto-create.
+SERVICE_USER_SYSTEM_ID = os.environ.get(
+    "RIS_PRESIGN_BRIDGE_USERNAME", "ai-presign-bridge"
 )
 
 
@@ -58,6 +77,69 @@ def connect_db():
         database=os.environ.get("OMRS_DB_NAME", "openmrs"),
         autocommit=True,
     )
+
+
+def ensure_service_user(conn) -> int:
+    """Look up (or provision) the AI presign bridge's service user, return user_id.
+
+    Per !107 review, the `radiology_report` row's audit columns must distinguish a
+    bridge write from an admin write. Uses `system_id` as the discriminator (same
+    convention `docker/openmrs/bootstrap_presign_concept.py` uses to find admin).
+
+    Provisioning strategy on first bridge start when the user is missing:
+      1. INSERT into person (gender='M' is a placeholder; OpenMRS requires a value)
+      2. INSERT into person_name (given='AI', family='Presign Bridge')
+      3. INSERT into users (system_id, username, person_id -> the row we just made)
+    Each INSERT uses admin's user_id (1) as its own `creator` -- the seed superuser
+    is the only user guaranteed to exist at bridge boot. From then on, the bridge
+    stamps its own writes to the new user.
+
+    No role assignment: this account is never intended for interactive login. If a
+    deployment provisions the user out-of-band (via bootstrap or by hand) with the
+    same system_id, this function finds it and skips the INSERT.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT user_id FROM users WHERE system_id=%s AND retired=0 LIMIT 1",
+            (SERVICE_USER_SYSTEM_ID,),
+        )
+        row = cur.fetchone()
+        if row:
+            return row[0]
+
+        # Create person
+        person_uuid = str(uuid.uuid4())
+        cur.execute(
+            "INSERT INTO person (gender, dead, creator, date_created, uuid, voided) "
+            "VALUES ('M', 0, 1, NOW(), %s, 0)",
+            (person_uuid,),
+        )
+        person_id = cur.lastrowid
+
+        # Create person_name
+        name_uuid = str(uuid.uuid4())
+        cur.execute(
+            "INSERT INTO person_name "
+            "(person_id, preferred, given_name, family_name, creator, date_created, uuid, voided) "
+            "VALUES (%s, 1, %s, %s, 1, NOW(), %s, 0)",
+            (person_id, "AI", "Presign Bridge", name_uuid),
+        )
+
+        # Create users row
+        user_uuid = str(uuid.uuid4())
+        cur.execute(
+            "INSERT INTO users "
+            "(system_id, username, person_id, creator, date_created, uuid, retired) "
+            "VALUES (%s, %s, %s, 1, NOW(), %s, 0)",
+            (SERVICE_USER_SYSTEM_ID, SERVICE_USER_SYSTEM_ID, person_id, user_uuid),
+        )
+        new_user_id = cur.lastrowid
+        print(
+            f"  provisioned service user system_id={SERVICE_USER_SYSTEM_ID} "
+            f"user_id={new_user_id} person_id={person_id}",
+            flush=True,
+        )
+        return new_user_id
 
 
 def order_id_for_uuid(conn, order_uuid: str):
@@ -92,34 +174,40 @@ def existing_report(conn, order_id: int):
         return cur.fetchone()
 
 
-def insert_draft(conn, order_id: int, body: str) -> int:
+def insert_draft(conn, order_id: int, body: str, service_user_id: int) -> int:
     """Create a fresh DRAFT radiology_report row so the radiology module's Report
-    form shows the AI's Diagnosis text on first open. creator=1 is the seed
-    superuser (o3 demo dictionary); voided defaults to 0 but we set it explicitly
-    to be self-documenting.
+    form shows the AI's Diagnosis text on first open.
+
+    `creator=service_user_id` per !107 review -- the audit trail names the bridge,
+    not admin. `voided` defaults to 0 but is set explicitly to be self-documenting.
     """
     row_uuid = str(uuid.uuid4())
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO radiology_report "
             "(order_id, report_status, report_body, creator, date_created, uuid, voided) "
-            "VALUES (%s, 'DRAFT', %s, 1, NOW(), %s, 0)",
-            (order_id, body, row_uuid),
+            "VALUES (%s, 'DRAFT', %s, %s, NOW(), %s, 0)",
+            (order_id, body, service_user_id, row_uuid),
         )
         return cur.lastrowid
 
 
-def update_draft_body(conn, report_id: int, body: str) -> None:
+def update_draft_body(
+    conn, report_id: int, body: str, service_user_id: int
+) -> None:
     """Fill in an empty DRAFT row's report_body. Never runs on a row with existing
     text or a non-DRAFT status -- caller enforces that; this function is dumb on
     purpose so an accidental call from the wrong branch cannot silently overwrite.
+
+    `changed_by=service_user_id` per !107 review -- the audit trail names the
+    bridge for the update, not admin.
     """
     with conn.cursor() as cur:
         cur.execute(
             "UPDATE radiology_report "
-            "SET report_body=%s, date_changed=NOW() "
+            "SET report_body=%s, changed_by=%s, date_changed=NOW() "
             "WHERE report_id=%s",
-            (body, report_id),
+            (body, service_user_id, report_id),
         )
 
 
@@ -132,7 +220,7 @@ def has_our_stamp(resource: dict) -> bool:
     another system's output; either way, not ours to bridge.
     """
     codes = [c.get("code") for c in ((resource.get("code") or {}).get("coding") or [])]
-    return AI_PRESIGN_CONCEPT_UUID in codes
+    return FHIR2_PRESIGN_REPORT_CONCEPT in codes
 
 
 def service_request_uuid(resource: dict):
@@ -173,7 +261,7 @@ def poll_fhir_reports(c: OmrsClient, cursor_iso: str) -> list:
     return out
 
 
-def bridge_report(c: OmrsClient, conn, resource: dict) -> str:
+def bridge_report(conn, resource: dict, service_user_id: int) -> str:
     """Bridge one AI DiagnosticReport into the radiology_report table.
 
     Returns a short outcome tag for the log line: `no-order`, `skip-touched`,
@@ -195,7 +283,7 @@ def bridge_report(c: OmrsClient, conn, resource: dict) -> str:
 
     current = existing_report(conn, order_id)
     if current is None:
-        new_id = insert_draft(conn, order_id, conclusion)
+        new_id = insert_draft(conn, order_id, conclusion, service_user_id)
         return f"{fhir_id}: insert -> report_id={new_id} order_id={order_id}"
 
     report_id, status, body = current
@@ -210,16 +298,17 @@ def bridge_report(c: OmrsClient, conn, resource: dict) -> str:
         return f"{fhir_id}: skip-touched report_id={report_id} status={status}"
 
     # DRAFT with empty body: our first write. Fill it.
-    update_draft_body(conn, report_id, conclusion)
+    update_draft_body(conn, report_id, conclusion, service_user_id)
     return f"{fhir_id}: update report_id={report_id}"
 
 
 def main() -> None:
     print(f"ris-presign-bridge up; polling every {POLL_SECONDS}s", flush=True)
-    print(f"  AI concept stamp: {AI_PRESIGN_CONCEPT_UUID}", flush=True)
+    print(f"  AI concept stamp: {FHIR2_PRESIGN_REPORT_CONCEPT}", flush=True)
 
     c = OmrsClient()
     conn = None
+    service_user_id = None
     # Cursor: a fixed early date on first start, then bumped to the latest
     # lastUpdated we saw. Kept in-memory only -- a restart re-processes from the
     # cursor floor, which is fine because every write path is idempotent
@@ -232,10 +321,14 @@ def main() -> None:
                 conn = connect_db()
             conn.ping()
 
+            if service_user_id is None:
+                service_user_id = ensure_service_user(conn)
+                print(f"  service user id: {service_user_id}", flush=True)
+
             reports = poll_fhir_reports(c, cursor_iso)
             for r in reports:
                 try:
-                    outcome = bridge_report(c, conn, r)
+                    outcome = bridge_report(conn, r, service_user_id)
                     print(f"  {outcome}", flush=True)
                 except Exception as e:  # noqa: BLE001 -- keep the bridge alive per-item
                     print(f"  {r.get('id', '?')}: ERROR {e!r}", flush=True)
@@ -247,6 +340,7 @@ def main() -> None:
         except Exception as e:  # noqa: BLE001 -- transient outages must not kill the bridge
             print(f"bridge cycle error: {e!r}", flush=True)
             conn = None
+            service_user_id = None  # re-run ensure on reconnect
         time.sleep(POLL_SECONDS)
 
 

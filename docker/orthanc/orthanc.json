@@ -1,8 +1,12 @@
 {
   // Minimal Orthanc config for the LH-Radiology dev stack.
-  // The orthancteam/orthanc image merges this (from /etc/orthanc/*.json) with the
-  // built-in Orthanc + plugin defaults (SQLite storage at /var/lib/orthanc/db,
-  // HTTP 8042, DICOM 4242, plugins auto-loaded).
+  //
+  // Mount target MUST be /etc/orthanc/orthanc.json exactly. The orthancteam image
+  // only reads that specific filename at boot; arbitrary *.json files are NOT
+  // merged (the earlier /etc/orthanc/lh-radiology.json mount was silently ignored
+  // -- PythonScript never registered and OnStableStudy never fired; !107 review).
+  // This file therefore replaces the image's default orthanc.json, so any setting
+  // we need for the stack (DICOMweb, HTTP, plugin config) has to be declared here.
   "Name": "lh-radiology",
 
   // Dev only: no HTTP auth so the OHIF viewer (proxied same-origin) can query freely.
