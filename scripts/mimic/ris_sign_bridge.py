@@ -25,9 +25,28 @@ from omrs_client import OmrsClient
 
 POLL_SECONDS = int(os.environ.get("BRIDGE_POLL_SECONDS", "10"))
 
+# fhir2 rejects a DiagnosticReport.conclusion over 1024 chars outright (422; live-bisected:
+# 1024 -> 200, 1025 -> 422), and presentedForm does not persist on this build -- so there is
+# nowhere fhir2-side for the full text. The cap therefore stays, but a silent cut is not
+# acceptable: Verification parses this body, and a quietly amputated report yields false
+# PASS/FAIL verdicts (#91). Truncation is now marked in-band (the marker fits inside the cap)
+# and logged loudly; the full text remains authoritative in the RIS only.
+FHIR2_CONCLUSION_MAX = 1024
+TRUNCATION_MARKER = " [TRUNCATED BY ris-sign-bridge: fhir2 caps conclusion at 1024 chars; full text in RIS]"
+
 
 def strip_html(s: str) -> str:
     return html.unescape(re.sub(r"<[^>]+>", " ", s or "")).strip()
+
+
+def capped_conclusion(report_id: int, body_text: str) -> str:
+    """The signed body, fitted to fhir2's hard cap -- loudly and with an in-band marker."""
+    if len(body_text) <= FHIR2_CONCLUSION_MAX:
+        return body_text
+    print(f"report {report_id}: signed body is {len(body_text)} chars but fhir2 caps "
+          f"conclusion at {FHIR2_CONCLUSION_MAX}; truncating WITH marker -- downstream "
+          f"verification sees a partial body", flush=True)
+    return body_text[:FHIR2_CONCLUSION_MAX - len(TRUNCATION_MARKER)] + TRUNCATION_MARKER
 
 
 def completed_reports(conn):
@@ -52,40 +71,56 @@ def connect():
         autocommit=True)
 
 
+def bridge_cycle(conn, c, bridged: set[int], missing: set[int]) -> None:
+    """One pass over COMPLETED RIS reports. `bridged` holds report_ids DONE (flipped, or found
+    already final); `missing` holds report_ids whose accession/seeded-report resolve has missed
+    at least once, so the miss is logged exactly once and RETRIED every cycle -- a resolve miss
+    is routinely transient (ETL still loading, fhir2 hiccup, order arriving late), and the old
+    permanent skip turned any hiccup into a silently lost human sign until a container restart
+    (#90)."""
+    for report_id, body, accession, given, family in completed_reports(conn):
+        if report_id in bridged:
+            continue
+        order = c.order_for_accession(accession)
+        if not order:
+            if report_id not in missing:
+                print(f"report {report_id}: no order for {accession}; will keep retrying",
+                      flush=True)
+                missing.add(report_id)
+            continue
+        fhir_id = c.find_seeded_report(order["patient_uuid"], order["order_uuid"])
+        if not fhir_id:
+            if report_id not in missing:
+                print(f"report {report_id}: no seeded fhir report for {accession}; "
+                      f"will keep retrying", flush=True)
+                missing.add(report_id)
+            continue
+        missing.discard(report_id)
+        r = c._fget(f"DiagnosticReport/{fhir_id}")
+        if r.get("status") == "final":
+            bridged.add(report_id)
+            continue
+        signer = f"{given or ''} {family or ''}".strip()
+        r["conclusion"] = capped_conclusion(report_id, strip_html(body))
+        r["status"] = "final"
+        c._fput("DiagnosticReport", fhir_id, r)
+        bridged.add(report_id)
+        print(f"bridged RIS report {report_id} ({accession}, signed by {signer}) "
+              f"-> DiagnosticReport/{fhir_id} final", flush=True)
+
+
 def main() -> None:
     c = OmrsClient()
     conn = None
     print(f"ris-sign-bridge up; polling every {POLL_SECONDS}s", flush=True)
     bridged: set[int] = set()
+    missing: set[int] = set()
     while True:
         try:
             if conn is None:
                 conn = connect()
             conn.ping()
-            for report_id, body, accession, given, family in completed_reports(conn):
-                if report_id in bridged:
-                    continue
-                order = c.order_for_accession(accession)
-                if not order:
-                    print(f"report {report_id}: no order for {accession}", flush=True)
-                    bridged.add(report_id)
-                    continue
-                fhir_id = c.find_seeded_report(order["patient_uuid"], order["order_uuid"])
-                if not fhir_id:
-                    print(f"report {report_id}: no seeded fhir report for {accession}", flush=True)
-                    bridged.add(report_id)
-                    continue
-                r = c._fget(f"DiagnosticReport/{fhir_id}")
-                if r.get("status") == "final":
-                    bridged.add(report_id)
-                    continue
-                signer = f"{given or ''} {family or ''}".strip()
-                r["conclusion"] = strip_html(body)[:1024]
-                r["status"] = "final"
-                c._fput("DiagnosticReport", fhir_id, r)
-                bridged.add(report_id)
-                print(f"bridged RIS report {report_id} ({accession}, signed by {signer}) "
-                      f"-> DiagnosticReport/{fhir_id} final", flush=True)
+            bridge_cycle(conn, c, bridged, missing)
         except Exception as e:  # noqa: BLE001 -- keep the bridge alive across transient outages
             print(f"bridge cycle error: {e!r}", flush=True)
             conn = None
