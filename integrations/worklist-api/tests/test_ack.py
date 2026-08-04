@@ -52,15 +52,22 @@ class FakeLedger:
 
 
 class FakeIdentity:
-    """Accepts exactly dr-ref/refpass; records every attempt so tests can pin WHEN identity is
-    even consulted."""
+    """Accepts exactly dr-ref/refpass (Basic) and sess-live (session cookie); records every
+    attempt on each path so tests can pin WHEN and BY WHICH proof identity is consulted."""
 
     def __init__(self):
         self.attempts: list[str] = []
+        self.session_attempts: list[str] = []
 
     async def whoami(self, username: str, password: str) -> str | None:
         self.attempts.append(username)
         if (username, password) == ("dr-ref", "refpass"):
+            return "Dr Referrer (uuid-ref)"
+        return None
+
+    async def whoami_session(self, jsessionid: str) -> str | None:
+        self.session_attempts.append(jsessionid)
+        if jsessionid == "sess-live":
             return "Dr Referrer (uuid-ref)"
         return None
 
@@ -168,6 +175,53 @@ def test_signature_for_another_task_does_not_open_this_one(rig):
     client, ledger, identity = rig
     r = client.get("/ack/task-70", params={"sig": _sig("task-7")}, auth=("dr-ref", "refpass"))
     assert r.status_code == 403
+    assert ledger.completed == []
+
+
+def test_live_openmrs_session_acks_in_one_click(rig):
+    """The in-EHR path: the browser already holds an authenticated OpenMRS session, so the tap
+    needs no second login -- identity comes from the forwarded JSESSIONID and Basic is never
+    consulted."""
+    client, ledger, identity = rig
+    client.cookies.set("JSESSIONID", "sess-live")
+    r = client.get("/ack/task-7", params={"sig": _sig()})
+    assert r.status_code == 200
+    assert ledger.completed == [("task-7", "Dr Referrer (uuid-ref)")]
+    assert identity.session_attempts == ["sess-live"]
+    assert identity.attempts == []          # no Basic prompt on the one-click path
+
+
+def test_stale_session_falls_back_to_the_basic_challenge(rig):
+    """A dead cookie is routine (sessions expire), not suspicious: the tap degrades to the
+    pre-existing login prompt instead of a refusal."""
+    client, ledger, identity = rig
+    client.cookies.set("JSESSIONID", "sess-expired")
+    r = client.get("/ack/task-7", params={"sig": _sig()})
+    assert r.status_code == 401
+    assert r.headers["www-authenticate"].startswith("Basic")
+    assert identity.session_attempts == ["sess-expired"]
+    assert ledger.completed == []
+
+
+def test_stale_session_with_valid_basic_still_acks_in_one_round_trip(rig):
+    client, ledger, identity = rig
+    client.cookies.set("JSESSIONID", "sess-expired")
+    r = client.get("/ack/task-7", params={"sig": _sig()}, auth=("dr-ref", "refpass"))
+    assert r.status_code == 200
+    assert ledger.completed == [("task-7", "Dr Referrer (uuid-ref)")]
+    assert identity.session_attempts == ["sess-expired"]
+    assert identity.attempts == ["dr-ref"]  # fallback consulted only after the cookie missed
+
+
+def test_forged_signature_never_consults_the_session_either(rig):
+    """Ordering is unchanged by the new path: signature FIRST, so a forged link learns nothing
+    from -- and sends nothing to -- the caller's live session."""
+    client, ledger, identity = rig
+    client.cookies.set("JSESSIONID", "sess-live")
+    r = client.get("/ack/task-7", params={"sig": "not-a-real-signature"})
+    assert r.status_code == 403
+    assert identity.session_attempts == []
+    assert identity.attempts == []
     assert ledger.completed == []
 
 
