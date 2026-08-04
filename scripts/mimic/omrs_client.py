@@ -551,13 +551,28 @@ class OmrsClient:
         return None
 
     def find_seeded_report(self, patient_uuid: str, service_request_uuid: str) -> Optional[str]:
-        """Our seeded DiagnosticReport for this order (basedOn the ServiceRequest), any status."""
+        """Our seeded DiagnosticReport for this order (basedOn the ServiceRequest), any status --
+        but NEVER the AI pre-sign impression draft (#89).
+
+        The #26 pre-sign draft is a second DiagnosticReport basedOn the SAME ServiceRequest, and
+        fhir2's bundle order is unspecified (today it happens to serve oldest-first, which hides
+        the bug), so "first basedOn match" could hand the sign-bridge the AI draft: the bridge
+        would then flip an AI-authored preliminary to `final` with the radiologist's name on the
+        log line -- a forged human sign. The draft is authorship-stamped with its dedicated
+        concept (#55), so exclusion by code is exact.
+        """
+        presign_concept = os.environ.get(
+            "FHIR2_PRESIGN_REPORT_CONCEPT", "e3641471-3f25-57b4-ab27-a3ebc66e481e")
         bundle = self._fget("DiagnosticReport", {"subject": f"Patient/{patient_uuid}"})
         want = f"ServiceRequest/{service_request_uuid}"
         for e in bundle.get("entry", []) or []:
             r = e.get("resource") or {}
-            if any((b.get("reference") == want) for b in (r.get("basedOn") or [])):
-                return r.get("id")
+            if not any((b.get("reference") == want) for b in (r.get("basedOn") or [])):
+                continue
+            codings = ((r.get("code") or {}).get("coding")) or []
+            if any(c.get("code") == presign_concept for c in codings):
+                continue  # the AI pre-sign draft -- never a sign target
+            return r.get("id")
         return None
 
     def close(self):
