@@ -20,15 +20,22 @@ in a deliberate order:
       through to OpenMRS. No new accounts, no password handling beyond that pass-through.
    A cookie that no longer resolves to an authenticated session falls through to the Basic
    challenge rather than failing: stale sessions are routine, not suspicious.
-3. **The ledger Task closes with WHO on it** (`complete_ack_task`: status COMPLETED + a note
+3. **The acknowledgement is a deliberate act, so it is a POST.** `GET /ack/{id}` renders a
+   confirmation page and changes nothing; the button on it POSTs. Once identity can come from
+   an ambient cookie (a above), a GET that acknowledged would be reachable without any human
+   act at all -- browsers prefetch on hover and refetch on tab restore, either of which would
+   close the escalation clock with a physician's name on it. Under Basic alone that was
+   impossible, because a prefetch carries no credentials. The physician still makes exactly
+   one click; it is just a click on a button that says what it will attest.
+4. **The ledger Task closes with WHO on it** (`complete_ack_task`: status COMPLETED + a note
    naming the acknowledger). `comms.checkAck` then reports COMPLETED and the orchestrator's
    escalation never fires — the run-book's "acknowledged in time" arc.
 
-A GET with a side effect, deliberately: the whole point is ONE tap on a paged phone. The HMAC
-gate means no third party can construct the URL, and the Basic gate means the tap is attributed;
-an idempotent re-tap (or a link-previewing mail client that somehow acquired both the link and
-credentials) lands on the already-acknowledged page without re-writing anything beyond a repeat
-COMPLETED — never a duplicated loop.
+Still ONE tap on a paged phone: the link opens the confirmation page, and the button on it is
+the tap. What the split buys is that everything which is not a tap — a prefetch, a tab restore,
+a link-previewing mail client, a security scanner — now lands on a page instead of writing an
+attestation. Re-tapping is idempotent either way: an already-acknowledged Task renders the
+already-acknowledged page and is never re-written, so there is no duplicated loop.
 
 Kept as a sibling module (the `assignment.py`/`store.py` pattern) so `main.py` stays the thin
 app factory. Inert until a deployment sets CRITCOM_ACK_HMAC_SECRET: without it every signature
@@ -39,6 +46,7 @@ from __future__ import annotations
 import base64
 import html
 import logging
+from urllib.parse import quote
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -75,6 +83,11 @@ class OpenmrsIdentity:
         uuid = user.get("uuid") or ""
         if not (display or uuid):
             return None
+        if not display:
+            # A uuid with no display would render as " (uuid-x)" -- a nameless audit line on
+            # the one string that says WHO attested. Name the uuid instead of leading with a
+            # blank.
+            return f"unknown user ({uuid})"
         return f"{display} ({uuid})" if uuid else display
 
     async def whoami(self, username: str, password: str) -> str | None:
@@ -110,11 +123,36 @@ def _page(title: str, lines: list[str]) -> HTMLResponse:
     )
 
 
+def _confirm_page(task_id: str, sig: str, who: str, finding: str | None) -> HTMLResponse:
+    """The GET page: says what is about to be attested, and who it will be attributed to.
+
+    The button POSTs, which is the whole point of the split -- see `acknowledge` below.
+    """
+    action = f"ack/{quote(task_id)}?sig={quote(sig)}"
+    return HTMLResponse(
+        f"<!doctype html><html><head><meta name=\"viewport\" "
+        f"content=\"width=device-width, initial-scale=1\">"
+        f"<title>Acknowledge critical result</title></head>"
+        f"<body style=\"font-family: sans-serif; max-width: 30em; margin: 3em auto;\">"
+        f"<h1 style=\"font-size:1.2em\">Acknowledge critical result</h1>"
+        + (f"<p>Finding: {html.escape(finding)}</p>" if finding else "")
+        + f"<p>This will be recorded as acknowledged by "
+          f"<strong>{html.escape(who)}</strong>, and closes the care team's escalation clock "
+          f"for this result.</p>"
+          f"<form method=\"post\" action=\"{html.escape(action)}\">"
+          f"<button type=\"submit\" style=\"font-size:1.1em; padding:0.6em 1.2em;\">"
+          f"Acknowledge</button></form></body></html>"
+    )
+
+
 def create_ack_router(ledger, identity: OpenmrsIdentity) -> APIRouter:
     router = APIRouter()
 
-    @router.get("/ack/{task_id}")
-    async def acknowledge(task_id: str, request: Request, sig: str = "") -> Response:
+    async def _resolve_caller(task_id: str, request: Request, sig: str):
+        """Signature, then identity. Returns `(who, early_response)`; `early_response` is a
+        challenge to return as-is. Shared by both methods so the ordering guarantee cannot
+        drift between them: the signature is checked BEFORE any credential is solicited or any
+        session is consulted, on GET and POST alike."""
         # 1. The link itself must be genuine -- BEFORE any credential prompt.
         if not verify_ack_task(task_id, sig):
             raise HTTPException(status_code=403, detail="invalid acknowledgement link")
@@ -134,16 +172,17 @@ def create_ack_router(ledger, identity: OpenmrsIdentity) -> APIRouter:
         if who is None:
             auth = request.headers.get("authorization", "")
             if not auth.lower().startswith("basic "):
-                return _challenge()
+                return None, _challenge()
             try:
                 username, _, password = base64.b64decode(auth[6:]).decode().partition(":")
             except Exception:
-                return _challenge()
+                return None, _challenge()
             who = await identity.whoami(username, password)
             if who is None:
-                return _challenge()
+                return None, _challenge()
+        return who, None
 
-        # 3. The loop.
+    async def _load(task_id: str):
         try:
             task = await ledger.get_task(task_id)
         except httpx.HTTPStatusError as e:
@@ -158,12 +197,43 @@ def create_ack_router(ledger, identity: OpenmrsIdentity) -> APIRouter:
                 finding = comm.finding_summary
             except Exception:  # noqa: BLE001 -- the page must not fail over its garnish
                 finding = None
+        return task, finding
 
+    def _already(finding: str | None) -> HTMLResponse:
+        return _page("Already acknowledged", [
+            f"Finding: {finding}" if finding else "",
+            "This critical result was already acknowledged; nothing further is needed.",
+        ])
+
+    @router.get("/ack/{task_id}")
+    async def confirm(task_id: str, request: Request, sig: str = "") -> Response:
+        """Renders the confirmation page. Deliberately changes NO state.
+
+        An acknowledgement is a clinical attestation that a named physician saw a critical
+        result, so it must follow a deliberate act. Once identity can come from an ambient
+        cookie, a GET that acknowledges is reachable without one: browsers prefetch on hover
+        and refetch on tab restore, and either would silently close the escalation clock with
+        a physician's name on it. Under the older Basic-only flow that could not happen,
+        because a prefetch carries no credentials. So the state change moved to POST and this
+        GET only asks. The click on the button is still the only click the physician makes.
+        """
+        who, early = await _resolve_caller(task_id, request, sig)
+        if early is not None:
+            return early
+        task, finding = await _load(task_id)
         if task.status in _ACKED:
-            return _page("Already acknowledged", [
-                f"Finding: {finding}" if finding else "",
-                "This critical result was already acknowledged; nothing further is needed.",
-            ])
+            return _already(finding)
+        return _confirm_page(task_id, sig, who, finding)
+
+    @router.post("/ack/{task_id}")
+    async def acknowledge(task_id: str, request: Request, sig: str = "") -> Response:
+        """The state change: submitted from the confirmation page's button."""
+        who, early = await _resolve_caller(task_id, request, sig)
+        if early is not None:
+            return early
+        task, finding = await _load(task_id)
+        if task.status in _ACKED:
+            return _already(finding)
 
         await ledger.complete_ack_task(task_id, acknowledged_by=who, at_iso=now_iso())
         _log.info("ack task %s completed by %s", task_id, who)
