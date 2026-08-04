@@ -405,6 +405,8 @@ services:
     environment:
       ORTHANC_BASE_URL: http://orthanc:8042
       WORKLIST_STORE_PATH: /var/lib/lhrad/worklist.sqlite
+      # ack-link verify side of CRITCOM_ACK_HMAC_SECRET (fails closed when empty)
+      CRITCOM_ACK_HMAC_SECRET: ${CRITCOM_ACK_HMAC_SECRET:-}
     volumes:
       - worklist-api-db:/var/lib/lhrad
     depends_on: [orthanc]
@@ -446,6 +448,11 @@ services:
       # a real deployment rides the https route (#75) and never sets the insecure flag.
       EHR_INBOX_WRITE_ENABLED: ${EHR_INBOX_WRITE_ENABLED:-}
       FHIR2_ALLOW_INSECURE_WRITE: ${FHIR2_ALLOW_INSECURE_WRITE:-}
+      # #79 ack surface, producer side: no link is minted until BOTH are set (secret signs the
+      # link, base URL routes it to worklist-api's /ack). Same pass-throughs as the tls overlay,
+      # so a local rehearsal doesn't need a hand-edited compose.
+      CRITCOM_ACK_HMAC_SECRET: ${CRITCOM_ACK_HMAC_SECRET:-}
+      CRITCOM_ACK_BASE_URL: ${CRITCOM_ACK_BASE_URL:-}
       # Optional Gemini-composed notification prose (composer.py): pass-throughs only, all
       # defaulting to empty (= off) -- the flag is the only switch, and the key NEVER lives in
       # this file (operator environment only; it rides the x-goog-api-key header, no URL/log).
