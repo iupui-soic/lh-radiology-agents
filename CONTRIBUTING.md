@@ -60,10 +60,9 @@ These are the ones that trip people up fastest. See `CLAUDE.md` for the full lis
 ## Finding work
 
 - Issues labeled **`intro`** are the best starting point for new contributors.
-- The **M0–M3 milestone backlog** tracks the broader roadmap.
-- Check the **Ownership table** in [`CLAUDE.md`](./CLAUDE.md) — it maps each workstream
-  (contracts/orchestrator, triage/EHR, interpretation/mocks, verification rules) to its owner,
-  so you know who to loop in for review on the area you're touching.
+- The **milestone backlog** tracks the broader roadmap; open work sits under `M4`/`M5`.
+- Check the **Ownership table** in [`CLAUDE.md`](./CLAUDE.md) — it maps each workstream to
+  its owner, so you know who to loop in for review on the area you're touching.
 
 ## Merge request conventions
 

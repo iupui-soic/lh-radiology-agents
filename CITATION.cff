@@ -1,0 +1,31 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "LH-Radiology Multi-Agent System"
+type: software
+version: 0.3.0
+date-released: 2026-07-15
+repository-code: "https://gitlab.com/librehealth/radiology/lh-radiology-agents"
+abstract: >-
+  Five A2A agents and a Temporal orchestrator that drive a radiology study from
+  PACS arrival through result communication, on LibreHealth Radiology (OpenMRS)
+  as EHR/RIS, fhir2 as the FHIR R4 data API, Orthanc PACS, and the OHIF viewer.
+authors:
+  - family-names: Pulavarthy
+    given-names: Lalitha Pranathi
+  - family-names: Naliyatthaliyazchayil
+    given-names: Parvati
+  - family-names: Sammeta
+    given-names: Chaitra Sree
+  - family-names: Gadeela
+    given-names: Viraj
+  - family-names: Gichoya
+    given-names: Judy Wawira
+  - family-names: Purkayastha
+    given-names: Saptarshi
+keywords:
+  - radiology
+  - multi-agent
+  - A2A
+  - FHIR
+  - Temporal
+  - LibreHealth

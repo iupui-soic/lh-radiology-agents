@@ -52,10 +52,11 @@ scripts/          validate_contracts.py (CI gate)
 ## Ownership
 | Owner | Workstream |
 |-------|------------|
-| **Pranathi** (lead) | contracts + shared libs; orchestrator + Temporal workflows; ingress (Orthanc rx + RIS poller); Report Verification engine; mock harness |
-| **Parvati** (senior) | Worklist Triage; EHR Assistant; Orthanc plugin; Worklist API; (M2) OHIF data source |
-| **Chaitra** (junior) | Impression Generation; Interpretation Assistant (registry + stubs); mocks & fixtures |
-| **Saptarshi** (PI) | Verification rules/config (YAML); cross-MR review; contract & schema sign-off |
+| **Pranathi** (lead) | contracts + shared libs; orchestrator + Temporal workflows; ingress (Orthanc rx + RIS poller); Report Verification engine; mock harness; Interpretation Assistant (registry + classifier) |
+| **Parvati** (senior) | Worklist Triage; EHR Assistant; Orthanc plugin; Worklist API; OHIF viewer integration (worklist route, deep link, findings publish); o3 pre-sign concept provisioning; DICOM SC evidence writeback |
+| **Chaitra** (junior) | Impression Generation; mocks & fixtures |
+| **Viraj** (junior) | the `intro` issue backlog: walking skeleton + fixtures, contributor docs & GitLab templates, small hardening tasks across agents |
+| **Saptarshi** (PI) | Verification rules/config (YAML); cross-MR review; contract & schema sign-off; EMBED mammography mapping spike; M4 showcase stack (MIMIC ETL, ris-sign-bridge, TLS overlay, run-book) |
 
 ## Locked decisions (do not relitigate without lead sign-off)
 - 5 agents in scope; the Communications Agent already exists (A2A + FastAPI) and is conformed
@@ -98,11 +99,14 @@ report-body parsing, and opt-in OpenTelemetry tracing. M3 (v0.3.0) hardened inte
 selection (real protocol aliases, ICD-10 family prefixes, bone-adjacency exclusions) and the fhir2
 write path: the dedicated pre-sign draft concept (#55) is provisioned into o3 at stack startup by
 `docker/openmrs/bootstrap_presign_concept.py`, and the plaintext-write transport guard is merged
-(!57). AI models stay stubbed behind the Interpretation tool registry. **M4 (in progress) is the
-MIMIC-CXR radiologist showcase:** a hosted demo where radiologists and referring physicians work a
-~100-study MIMIC-CXR cohort through the full pipeline. It carries #66, #68-#79 and the #27/#30
-umbrellas (real COMPLETE-emitting CAD in #71; TLS in production and the least-privilege fhir2
-account in #75); the critical path is #70 (prove the RIS sign-off link) plus #68 (the ETL). **M5 is
-the EMBED mammography flagship** after the demo (#31; mapping in
-`docs/embed-mammography-mapping.md`). Search `TODO(M3)` for open code markers; the full plan is the
-GitLab issue backlog.
+(!57). **M4 (in progress) is the MIMIC-CXR radiologist showcase:** a hosted demo where radiologists
+and referring physicians work a ~100-study MIMIC-CXR cohort through the full pipeline. Landed so
+far: the cohort ETL (#68 core slices), the Communications agent as a compose service (#69), the
+first real CAD — a pneumothorax classifier behind `pneumothorax-detect` (#71; every other model
+stays stubbed behind the Interpretation tool registry) — and the `ris-sign-bridge` workaround for
+the o3 module's broken sign emit (d210810). The critical path now runs through the first live demo
+run's findings: #82 (RIS human sign-off broken end to end), #83 (the deployed agent image predates
+#71 — no torch, so the classifier never runs), the sign-bridge defect batch (#89–#93), TLS +
+least-privilege hosting (#75), and run-book rehearsals (#76). **M5 is the EMBED mammography
+flagship** after the demo (#31; mapping in `docs/embed-mammography-mapping.md`). Search `TODO(M3)`
+for open code markers; the full plan is the GitLab issue backlog.
