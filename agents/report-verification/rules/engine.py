@@ -168,13 +168,32 @@ def load_custom_checks(custom_dir: Path):
     return checks
 
 
-def run_rules(ctx: dict, rules_dir: Path) -> tuple[str, bool, list[dict]]:
+@dataclass(frozen=True)
+class LoadedRules:
+    """The rule library, loaded and validated once (#96). run_rules takes this instead of a
+    directory so a report.verify call never touches disk or re-execs a custom-check module."""
+    yaml_rules: tuple[Rule, ...]
+    custom_checks: tuple
+
+
+def load_rules(rules_dir: Path) -> LoadedRules:
+    """Load and validate the whole library in one shot. Raises (naming the offending file, via
+    load_yaml_rules #43) on a malformed rule. The handler calls this at import time, so a bad
+    rule refuses to BOOT the agent instead of failing every report.verify behind Temporal's
+    unbounded activity retry, which is how a YAML typo used to become a quietly parked study."""
+    return LoadedRules(
+        yaml_rules=tuple(load_yaml_rules(rules_dir)),
+        custom_checks=tuple(load_custom_checks(rules_dir / "custom")),
+    )
+
+
+def run_rules(ctx: dict, rules: LoadedRules) -> tuple[str, bool, list[dict]]:
     issues: list[dict] = []
-    for rule in load_yaml_rules(rules_dir):
+    for rule in rules.yaml_rules:
         issue = evaluate(rule, ctx)
         if issue:
             issues.append(issue)
-    for check in load_custom_checks(rules_dir / "custom"):
+    for check in rules.custom_checks:
         issue = check(ctx)
         if issue:
             issues.append(issue)
