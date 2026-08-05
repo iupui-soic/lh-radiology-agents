@@ -24,7 +24,8 @@ Context keys: `report`, `impression`, `ehrContext`, `aiFindings`.
 `rules/report_body.py` structures it into `report.body`, so rules can match on:
 `report.body.present` (bool — gate custom rules on this so they stay inert when fhir2 gave nothing),
 `report.body.laterality` (left|right|bilateral|null), `report.body.sections` (`{findings, impression,
-technique, comparison, clinicalHistory, recommendation}` — a CONCLUSION header folds into `impression`),
+technique, comparison, clinicalHistory, recommendation, notification}` — a CONCLUSION header folds
+into `impression`; NOTIFICATION is the MIMIC result-communication section, #92),
 `report.body.biradsAssessment` (int, NOT range-clamped — an out-of-range value is left visible so a
 validity rule can flag it), `report.body.breastDensity` (A–D), and `report.body.text` (the raw
 narrative, for keyword scans). The impression's own laterality is derived from its text into

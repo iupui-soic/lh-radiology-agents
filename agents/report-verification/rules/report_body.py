@@ -25,6 +25,10 @@ _SECTION_HEADERS = {
     "conclusion": "impression",
     "recommendations": "recommendation",
     "recommendation": "recommendation",
+    # MIMIC-CXR reports document result communication under a NOTIFICATION header; the
+    # critical-comm-required rule scopes its evidence scan to this section (#92).
+    "notification": "notification",
+    "notifications": "notification",
 }
 
 # One alternation of every header label, longest first so "clinical history" wins over "history".
