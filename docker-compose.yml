@@ -324,8 +324,17 @@ services:
       FHIR2_ALLOW_INSECURE_WRITE: "1"
       # Live fhir2 401s unauthenticated reads and the callers swallow fhir2 errors by design,
       # so missing credentials fail SILENTLY (#53). Dev-stack values = the o3 admin account.
-      FHIR2_BASIC_USER: admin
-      FHIR2_BASIC_PASS: Admin123
+      # Two-account split (#75/#30): FHIR2_BASIC_* is the WRITER identity (the pre-sign draft
+      # here, the inbox write on communications, the sign flip on ris-sign-bridge), scoped on
+      # the demo host to clinical reads plus Add/Edit Observations, the narrowest OpenMRS
+      # privilege pair covering Obs-backed DiagnosticReport create/update. The fetch-only
+      # agents (ehr-assistant, impression-generation, report-verification) ride FHIR2_RO_*,
+      # whose default nests onto the writer creds and then admin, so a dev stack with nothing
+      # set behaves exactly as before. On the host the two pairs point at radagent-svc /
+      # radagent-ro, and a write under the read-only account is refused by OpenMRS naming the
+      # missing privileges (live-verified 2026-08-05).
+      FHIR2_BASIC_USER: ${FHIR2_BASIC_USER:-admin}
+      FHIR2_BASIC_PASS: ${FHIR2_BASIC_PASS:-Admin123}
       # Pre-sign impression draft (#26) codes its DiagnosticReport with a real OpenMRS Concept
       # (fhir2 rejects a text-only code with codeRequired). Default is the LH-Radiology "AI pre-sign
       # impression draft" concept, provisioned into the o3 concept dictionary at stack startup by
@@ -371,8 +380,8 @@ services:
     ports: ["8102:8102"]
     environment:
       <<: *otel-env
-      FHIR2_BASIC_USER: admin
-      FHIR2_BASIC_PASS: Admin123
+      FHIR2_BASIC_USER: ${FHIR2_RO_USER:-${FHIR2_BASIC_USER:-admin}}
+      FHIR2_BASIC_PASS: ${FHIR2_RO_PASS:-${FHIR2_BASIC_PASS:-Admin123}}
       # Read-only fhir2 consumer: the #67 read-transport guard refuses plaintext-to-remote reads
       # without an opt-in, and this hop is plaintext http to the in-compose openmrs (same accepted
       # posture as the orchestrator's FHIR2_ALLOW_INSECURE_WRITE note; a real deployment uses an
@@ -393,8 +402,8 @@ services:
     ports: ["8104:8104"]
     environment:
       <<: *otel-env
-      FHIR2_BASIC_USER: admin
-      FHIR2_BASIC_PASS: Admin123
+      FHIR2_BASIC_USER: ${FHIR2_RO_USER:-${FHIR2_BASIC_USER:-admin}}
+      FHIR2_BASIC_PASS: ${FHIR2_RO_PASS:-${FHIR2_BASIC_PASS:-Admin123}}
       # Read-only fhir2 consumer: the #67 read-transport guard refuses plaintext-to-remote reads
       # without an opt-in, and this hop is plaintext http to the in-compose openmrs (same accepted
       # posture as the orchestrator's FHIR2_ALLOW_INSECURE_WRITE note; a real deployment uses an
@@ -409,8 +418,8 @@ services:
     ports: ["8105:8105"]
     environment:
       <<: *otel-env
-      FHIR2_BASIC_USER: admin
-      FHIR2_BASIC_PASS: Admin123
+      FHIR2_BASIC_USER: ${FHIR2_RO_USER:-${FHIR2_BASIC_USER:-admin}}
+      FHIR2_BASIC_PASS: ${FHIR2_RO_PASS:-${FHIR2_BASIC_PASS:-Admin123}}
       # Read-only fhir2 consumer: the #67 read-transport guard refuses plaintext-to-remote reads
       # without an opt-in, and this hop is plaintext http to the in-compose openmrs (same accepted
       # posture as the orchestrator's FHIR2_ALLOW_INSECURE_WRITE note; a real deployment uses an
@@ -452,8 +461,8 @@ services:
       <<: *otel-env
       COMMS_LEDGER_BASE_URL: http://comms-ledger:8080/fhir
       FHIR2_BASE_URL: http://openmrs:8080/openmrs/ws/fhir2/R4
-      FHIR2_BASIC_USER: admin
-      FHIR2_BASIC_PASS: Admin123
+      FHIR2_BASIC_USER: ${FHIR2_BASIC_USER:-admin}
+      FHIR2_BASIC_PASS: ${FHIR2_BASIC_PASS:-Admin123}
       # Read-only fhir2 consumer (ServiceRequest.requester): the #67 read-transport guard refuses
       # plaintext-to-remote reads without an opt-in, and this hop is plaintext http to the
       # in-compose openmrs (see the orchestrator's FHIR2_ALLOW_INSECURE_WRITE note; a real
