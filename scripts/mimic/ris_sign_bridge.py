@@ -44,9 +44,12 @@ def _note_miss(missing: dict[int, int], report_id: int, what: str) -> None:
 
 
 def completed_reports(conn):
+    # p.uuid rides along so the bridged DiagnosticReport can carry the signer as a
+    # Practitioner reference (#93): fhir2 maps Practitioner ids to provider uuids.
     with conn.cursor() as cur:
         cur.execute(
-            "select rr.report_id, rr.report_body, o.accession_number, pn.given_name, pn.family_name "
+            "select rr.report_id, rr.report_body, o.accession_number, pn.given_name, "
+            "pn.family_name, p.uuid "
             "from radiology_report rr "
             "join orders o on o.order_id = rr.order_id "
             "left join provider p on p.provider_id = rr.principal_results_interpreter "
@@ -76,7 +79,7 @@ def bridge_cycle(conn, c, bridged: set[int], missing: dict[int, int]) -> None:
     resolve miss is routinely transient (ETL still loading, fhir2 hiccup, order arriving late),
     and the old permanent skip turned any hiccup into a silently lost human sign until a
     container restart (#90)."""
-    for report_id, body, accession, given, family in completed_reports(conn):
+    for report_id, body, accession, given, family, provider_uuid in completed_reports(conn):
         if report_id in bridged:
             continue
         order = c.order_for_accession(accession)
@@ -103,9 +106,26 @@ def bridge_cycle(conn, c, bridged: set[int], missing: dict[int, int]) -> None:
             conclusion = TRUNCATION_MARKER + conclusion
         r["conclusion"] = conclusion
         r["status"] = "final"
+        # Stamp the signer as performer (#93): a UI sign attributes the report, so the bridged
+        # equivalent must too, or the final chart copy carries no radiologist. Practitioner id =
+        # the interpreter's provider uuid in fhir2. A COMPLETED report without an interpreter
+        # row still bridges (losing the sign would be worse than losing the attribution), it is
+        # just left unstamped and the bridged log line says so.
+        # KNOWN LIMIT (live-verified 2026-08-05): this fhir2 build (4.1.0) accepts the PUT and
+        # silently DROPS performer AND resultsInterpreter, the same accepts-and-drops family as
+        # its identifier handling. The stamp still goes out because it costs nothing and starts
+        # working the day the translator does; until then the RIS row
+        # (radiology_report.principal_results_interpreter) and this log line are the
+        # authoritative attribution record.
+        if provider_uuid:
+            performer = {"reference": f"Practitioner/{provider_uuid}"}
+            if signer:
+                performer["display"] = signer
+            r["performer"] = [performer]
         c._fput("DiagnosticReport", fhir_id, r)
         bridged.add(report_id)
-        print(f"bridged RIS report {report_id} ({accession}, signed by {signer}) "
+        print(f"bridged RIS report {report_id} ({accession}, signed by "
+              f"{signer or 'UNKNOWN: no interpreter recorded'}) "
               f"-> DiagnosticReport/{fhir_id} final", flush=True)
 
 

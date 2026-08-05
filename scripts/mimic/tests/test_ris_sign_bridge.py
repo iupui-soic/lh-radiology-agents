@@ -55,7 +55,7 @@ def _rows(monkeypatch, rows):
     monkeypatch.setattr(bridge, "completed_reports", lambda conn: rows)
 
 
-ROW = (7, "<p>Pneumothorax.</p>", "s123", "Jake", "Doctor")
+ROW = (7, "<p>Pneumothorax.</p>", "s123", "Jake", "Doctor", "prov-uuid-1")
 
 
 # --- module import stays collectable in the pymysql-less CI lane ------------
@@ -157,7 +157,7 @@ def test_clamp_keeps_tail_when_findings_alone_too_long():
 def test_bridge_writes_marker_prefixed_tail(monkeypatch):
     c = _FakeClient(order={"patient_uuid": "p", "order_uuid": "o"}, fhir_id="dr-1")
     long_body = "HISTORY: dyspnea. " * 100 + "FINDINGS: " + "w" * 1500 + " IMPRESSION: large pneumothorax."
-    _rows(monkeypatch, [(7, long_body, "s123", "Jake", "Doctor")])
+    _rows(monkeypatch, [(7, long_body, "s123", "Jake", "Doctor", "prov-uuid-1")])
     bridge.bridge_cycle(None, c, set(), {})
     (_, body), = c.put_calls
     assert body["status"] == "final"
@@ -169,7 +169,7 @@ def test_bridge_writes_marker_prefixed_tail(monkeypatch):
 
 def test_bridge_logs_the_cut(monkeypatch, capsys):
     c = _FakeClient(order={"patient_uuid": "p", "order_uuid": "o"}, fhir_id="dr-1")
-    _rows(monkeypatch, [(7, "v" * 3000, "s123", "Jake", "Doctor")])
+    _rows(monkeypatch, [(7, "v" * 3000, "s123", "Jake", "Doctor", "prov-uuid-1")])
     bridge.bridge_cycle(None, c, set(), {})
     assert "caps conclusion" in capsys.readouterr().out
 
@@ -181,6 +181,31 @@ def test_bridge_short_body_gets_no_marker(monkeypatch):
     (_, body), = c.put_calls
     assert bridge.TRUNCATION_MARKER not in body["conclusion"]
     assert body["conclusion"] == "Pneumothorax."
+
+
+# --- #93: the signer reaches the bridged resource ---------------------------
+
+
+def test_bridge_stamps_the_signer_as_performer(monkeypatch):
+    c = _FakeClient(order={"patient_uuid": "p", "order_uuid": "o"}, fhir_id="dr-1")
+    _rows(monkeypatch, [ROW])
+    bridge.bridge_cycle(None, c, set(), {})
+    (_, body), = c.put_calls
+    assert body["performer"] == [{"reference": "Practitioner/prov-uuid-1",
+                                  "display": "Jake Doctor"}], \
+        "a UI sign attributes the report; the bridged equivalent must too (#93)"
+
+
+def test_missing_interpreter_still_bridges_without_performer(monkeypatch, capsys):
+    # Losing the sign would be worse than losing the attribution: an interpreter-less
+    # COMPLETED row still flips, unstamped, and the log line says so.
+    c = _FakeClient(order={"patient_uuid": "p", "order_uuid": "o"}, fhir_id="dr-1")
+    _rows(monkeypatch, [(7, "Pneumothorax.", "s123", None, None, None)])
+    bridge.bridge_cycle(None, c, set(), {})
+    (_, body), = c.put_calls
+    assert body["status"] == "final"
+    assert "performer" not in body
+    assert "UNKNOWN: no interpreter recorded" in capsys.readouterr().out
 
 
 # --- #89: the AI pre-sign draft is never the sign target --------------------

@@ -516,8 +516,10 @@ services:
     command: python3 ris_sign_bridge.py
     environment:
       FHIR2_BASE_URL: http://openmrs:8080/openmrs/ws/fhir2/R4
-      FHIR2_BASIC_USER: admin
-      FHIR2_BASIC_PASS: Admin123
+      # Passthrough, not literals (#93): the #75 least-privilege fhir2 account slots in via
+      # env without editing this file. Dev default stays admin.
+      FHIR2_BASIC_USER: ${FHIR2_BASIC_USER:-admin}
+      FHIR2_BASIC_PASS: ${FHIR2_BASIC_PASS:-Admin123}
     depends_on:
       mariadb:
         condition: service_started
