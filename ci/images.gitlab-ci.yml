@@ -1,0 +1,220 @@
+# Image build and publish lane (#97).
+#
+# Every compose service with a build: block gets an image at $CI_REGISTRY_IMAGE/<service>,
+# named after the compose service. The tagging scheme:
+#   - main pipelines push :main plus :$CI_COMMIT_SHORT_SHA, and run AFTER the test stages,
+#     so a published image always corresponds to a green commit on main
+#   - release tag pipelines (vX.Y.Z) push :$CI_COMMIT_TAG, so a demo deploy can name the
+#     exact release the reviewers saw
+#   - MR pipelines build WITHOUT pushing, and only the images whose inputs changed, so a
+#     broken Dockerfile is caught before merge without rebuilding the world on every MR
+# The o3 image is out of scope here; lh-radiology's own CI publishes it.
+#
+# The docker + dind pairing below mirrors lh-radiology's o3 build job, the one configuration
+# proven to build and push on this group runner (docker executor, privileged, linux/amd64,
+# which matches the demo host arch). Pinning these two images by digest (#72 discipline) is
+# deferred until the lane has run green once, then a follow-up commit pins what worked.
+
+# Publish rules shared by every image job. Anchors, not extends: each job needs its own
+# rules list anyway for its per-image changes: globs, and rules: on a job replaces the
+# template's wholesale.
+.publish-on-main: &publish-on-main
+  if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+  variables:
+    PUBLISH_TAGS: 'main $CI_COMMIT_SHORT_SHA'
+
+.publish-on-tag: &publish-on-tag
+  if: '$CI_COMMIT_TAG'
+  variables:
+    PUBLISH_TAGS: '$CI_COMMIT_TAG'
+
+.build-image:
+  stage: build
+  tags: [docker]
+  image: docker:latest
+  services:
+    - docker:dind
+  variables:
+    DOCKER_BUILDKIT: '1'
+    BUILD_CONTEXT: '.'
+  # Generous ceiling for the cold first build of the heavy images (torch, OHIF monorepo).
+  # Warm --cache-from runs are far shorter. The runner sets no maximum, so this stands.
+  timeout: 3h
+  before_script:
+    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+  script:
+    # Warm the layer cache from the last published main image. BuildKit tolerates an absent
+    # cache source (first ever run, or an expired tag) and simply builds cold.
+    - >
+      docker build --pull
+      --build-arg BUILDKIT_INLINE_CACHE=1
+      --cache-from "$CI_REGISTRY_IMAGE/$IMAGE_NAME:main"
+      -f "$DOCKERFILE" -t "$IMAGE_NAME:ci" "$BUILD_CONTEXT"
+    # PUBLISH_TAGS is set by the main and tag rules and empty in MR pipelines, where the
+    # loop no-ops and the job is purely a does-it-still-build check.
+    - |
+      if [ -z "$PUBLISH_TAGS" ]; then echo "MR pipeline: build check only, nothing pushed"; fi
+      for tag in $PUBLISH_TAGS; do
+        docker tag "$IMAGE_NAME:ci" "$CI_REGISTRY_IMAGE/$IMAGE_NAME:$tag"
+        docker push "$CI_REGISTRY_IMAGE/$IMAGE_NAME:$tag"
+      done
+
+# Change globs per job list the image's actual build inputs, straight from its Dockerfile's
+# COPY lines, plus this file (an edit to the lane re-proves every build, which is also what
+# makes the introducing MR run all ten jobs once). The python images all copy libs/ and
+# their own tree; all but worklist-api copy contracts/ too.
+
+orchestrator-image:
+  extends: .build-image
+  variables:
+    IMAGE_NAME: orchestrator
+    DOCKERFILE: orchestrator/Dockerfile
+  rules:
+    - *publish-on-main
+    - *publish-on-tag
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes:
+        - ci/images.gitlab-ci.yml
+        - orchestrator/**/*
+        - libs/radagent-common/**/*
+        - contracts/**/*
+
+worklist-triage-image:
+  extends: .build-image
+  variables:
+    IMAGE_NAME: worklist-triage
+    DOCKERFILE: agents/worklist-triage/Dockerfile
+  rules:
+    - *publish-on-main
+    - *publish-on-tag
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes:
+        - ci/images.gitlab-ci.yml
+        - agents/worklist-triage/**/*
+        - libs/radagent-common/**/*
+        - contracts/**/*
+
+ehr-assistant-image:
+  extends: .build-image
+  variables:
+    IMAGE_NAME: ehr-assistant
+    DOCKERFILE: agents/ehr-assistant/Dockerfile
+  rules:
+    - *publish-on-main
+    - *publish-on-tag
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes:
+        - ci/images.gitlab-ci.yml
+        - agents/ehr-assistant/**/*
+        - libs/radagent-common/**/*
+        - contracts/**/*
+
+interpretation-assistant-image:
+  # The heavy one: the Dockerfile installs torch for the #71 pneumothorax classifier. The
+  # deployed image predating exactly that install is what #83 is about, so this job existing
+  # and publishing is the point of the lane.
+  extends: .build-image
+  variables:
+    IMAGE_NAME: interpretation-assistant
+    DOCKERFILE: agents/interpretation-assistant/Dockerfile
+  rules:
+    - *publish-on-main
+    - *publish-on-tag
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes:
+        - ci/images.gitlab-ci.yml
+        - agents/interpretation-assistant/**/*
+        - libs/radagent-common/**/*
+        - contracts/**/*
+
+impression-generation-image:
+  extends: .build-image
+  variables:
+    IMAGE_NAME: impression-generation
+    DOCKERFILE: agents/impression-generation/Dockerfile
+  rules:
+    - *publish-on-main
+    - *publish-on-tag
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes:
+        - ci/images.gitlab-ci.yml
+        - agents/impression-generation/**/*
+        - libs/radagent-common/**/*
+        - contracts/**/*
+
+report-verification-image:
+  extends: .build-image
+  variables:
+    IMAGE_NAME: report-verification
+    DOCKERFILE: agents/report-verification/Dockerfile
+  rules:
+    - *publish-on-main
+    - *publish-on-tag
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes:
+        - ci/images.gitlab-ci.yml
+        - agents/report-verification/**/*
+        - libs/radagent-common/**/*
+        - contracts/**/*
+
+communications-image:
+  extends: .build-image
+  variables:
+    IMAGE_NAME: communications
+    DOCKERFILE: agents/communications/Dockerfile
+  rules:
+    - *publish-on-main
+    - *publish-on-tag
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes:
+        - ci/images.gitlab-ci.yml
+        - agents/communications/**/*
+        - libs/radagent-common/**/*
+        - contracts/**/*
+
+worklist-api-image:
+  extends: .build-image
+  variables:
+    IMAGE_NAME: worklist-api
+    DOCKERFILE: integrations/worklist-api/Dockerfile
+  rules:
+    - *publish-on-main
+    - *publish-on-tag
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes:
+        - ci/images.gitlab-ci.yml
+        - integrations/worklist-api/**/*
+        - libs/radagent-common/**/*
+
+ohif-image:
+  # The other heavy one: the Dockerfile clones and builds the OHIF monorepo. Note the base
+  # checkout is the unpinned release/3.6 branch (see the MR !45 review note), so rebuilds
+  # are not bit-reproducible even with unchanged inputs; publishing from CI at least makes
+  # every deployed build traceable to a pipeline.
+  extends: .build-image
+  variables:
+    IMAGE_NAME: ohif
+    DOCKERFILE: integrations/ohif-extension/Dockerfile
+  rules:
+    - *publish-on-main
+    - *publish-on-tag
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes:
+        - ci/images.gitlab-ci.yml
+        - integrations/ohif-extension/**/*
+
+ris-sign-bridge-image:
+  # Context is scripts/mimic (the Dockerfile COPYs the whole dir), unlike everything else,
+  # which builds from the repo root.
+  extends: .build-image
+  variables:
+    IMAGE_NAME: ris-sign-bridge
+    DOCKERFILE: scripts/mimic/Dockerfile
+    BUILD_CONTEXT: scripts/mimic
+  rules:
+    - *publish-on-main
+    - *publish-on-tag
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes:
+        - ci/images.gitlab-ci.yml
+        - scripts/mimic/**/*
