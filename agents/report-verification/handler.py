@@ -16,10 +16,15 @@ from pathlib import Path
 
 from radagent_common.fhir_client import Fhir2Client
 from radagent_common.tracing import now_iso
-from rules.engine import enrich_report_body, run_rules
+from rules.engine import enrich_report_body, load_rules, run_rules
 
 AGENT_VERSION = "0.1.0"
 _RULES_DIR = Path(__file__).resolve().parent / "rules"
+# Loaded and validated ONCE, at import (#96): server.py imports this module, so a malformed rule
+# file refuses to boot the agent with an error naming the file. Before this, run_rules re-read the
+# directory and re-exec'd every custom check per report.verify call, and a bad rule raised per
+# request instead, which Temporal's unbounded activity retry turned into a quietly parked study.
+_RULES = load_rules(_RULES_DIR)
 _log = logging.getLogger(__name__)
 
 # Read-only fhir2 client for report-content lookup (#22). Lazily built so importing this module has
@@ -62,7 +67,7 @@ async def handle(skill_id: str, payload: dict) -> dict:
         "aiFindings": payload.get("aiFindings") or {},
     }
     enrich_report_body(rule_ctx, await _report_narrative(rule_ctx["report"]))
-    status, requires_review, issues = run_rules(rule_ctx, _RULES_DIR)
+    status, requires_review, issues = run_rules(rule_ctx, _RULES)
     return {
         "schemaVersion": "1.0.0",
         "workflowId": ctx["workflowId"],

@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from rules.engine import Rule, evaluate, load_yaml_rules
+from rules.engine import Rule, evaluate, load_rules, load_yaml_rules
 
 
 def _comparison_rule(op: str, value: object) -> Rule:
@@ -117,3 +117,27 @@ def test_shipped_yaml_rules_still_load():
     rules = load_yaml_rules(rules_dir)
 
     assert len(rules) == len(yaml_files)
+
+
+# --- load-once (#96): the library is loaded and validated at agent boot, not per verify call ----
+
+
+def test_load_rules_bundles_the_whole_library():
+    rules_dir = Path(__file__).parents[1] / "rules"
+
+    loaded = load_rules(rules_dir)
+
+    assert len(loaded.yaml_rules) == len(list(rules_dir.glob("*.yaml")))
+    assert loaded.custom_checks  # the shipped custom checks came along
+    assert all(callable(c) for c in loaded.custom_checks)
+
+
+def test_load_rules_raises_on_a_malformed_rule_naming_the_file(tmp_path):
+    """The boot-refusal path: handler.py calls load_rules at import, so this raise IS the failed
+    agent start the #96 acceptance asks for (instead of a per-request failure that Temporal's
+    unbounded retry turns into a quietly parked study)."""
+    (tmp_path / "custom").mkdir()
+    _write_rule(tmp_path / "bad-severity.yaml", severity="WARNING")
+
+    with pytest.raises(ValueError, match=r"bad-severity\.yaml: unknown severity 'WARNING'"):
+        load_rules(tmp_path)

@@ -192,3 +192,25 @@ async def test_clean_report_with_narrative_still_passes():
     validate_skill_output("report.verify", out)
     assert out["verificationStatus"] == "PASS"
     assert out["issues"] == []
+
+
+# --- load-once (#96): report.verify must not re-read the rules directory or re-exec the custom
+#     checks. The library is bound at import; these loaders exploding proves nothing calls them. --
+
+
+async def test_verify_calls_do_not_reload_the_rule_library(monkeypatch):
+    import rules.engine as engine
+
+    def _must_not_be_called(*_a, **_k):
+        raise AssertionError("report.verify re-read the rules directory (#96 regression)")
+
+    monkeypatch.setattr(engine, "load_yaml_rules", _must_not_be_called)
+    monkeypatch.setattr(engine, "load_custom_checks", _must_not_be_called)
+    for _ in range(2):
+        out = await handle("report.verify", {
+            "studyContext": SAMPLE_CONTEXT,
+            "impression": {"impressionText": "No acute findings.",
+                           "criticalFlags": [], "recommendations": []},
+        })
+        validate_skill_output("report.verify", out)
+        assert out["verificationStatus"] == "PASS"
