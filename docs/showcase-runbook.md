@@ -116,6 +116,33 @@ and only a positive screen ever becomes a COMPLETE finding. Full detail: `docs/c
 - Full reset (between sessions only): selective `docker volume rm <project>_mariadb-data` +
   seed reload; ledger and ingress volumes untouched.
 
+## 6a. Deploy window: updating the app services (#98)
+
+The app services run CI-published images (#97), so a deploy is a pull, never a host build --
+the drift class behind #83 cannot recur. Only in an announced window, never mid-review:
+
+1. Announce the window; finish or reset any in-flight arc.
+2. On the host (repo root, with the SAME `-f` overlay chain the stack was started with --
+   a bare `docker compose` command against an overlay-started stack recreates services and
+   can land the OpenMRS volume wedge):
+   ```bash
+   git pull                                   # compose + configs only; images come from CI
+   docker compose -f docker-compose.yml -f docker-compose.tls.yml pull \
+     orchestrator worklist-triage ehr-assistant interpretation-assistant \
+     impression-generation report-verification communications worklist-api ohif ris-sign-bridge
+   docker compose -f docker-compose.yml -f docker-compose.tls.yml up -d --no-deps \
+     orchestrator worklist-triage ehr-assistant interpretation-assistant \
+     impression-generation report-verification communications worklist-api ohif ris-sign-bridge
+   ```
+   `--no-deps` is load-bearing: the stateful set (openmrs, mariadb, orthanc and its volume,
+   temporal's postgres, the comms ledger) is never touched by a deploy.
+3. Pin what reviewers see: `APP_IMAGE_TAG=vX.Y.Z` (or a short SHA for an urgent fix) in the
+   host env steers which published tag the pull fetches; unset means `main`. Pulls are
+   anonymous -- the project registry is public, the host needs no token.
+4. Smoke: §1.6 (proxy 401, `/reading` lists the cohort, one seeder `finalize` releases a
+   study end to end), then §2's arc 1 once, quickly.
+5. Log the deploy (date, tag, operator) in the demo diary next to the rehearsal notes.
+
 ## 7. Recording plan
 
 One continuous 1920×1080 capture per arc, browser only, no dev tools; the phone on camera for
