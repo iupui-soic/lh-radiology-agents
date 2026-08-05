@@ -33,15 +33,17 @@ services:
     #     registry.gitlab.com/librehealth/radiology/lh-radiology/o3:o3   (docker pull, no auth)
     #   Build from source instead (module developers): clone lh-radiology on the o3 branch as a
     #   sibling of this repo, then `docker compose build openmrs` (uses the build: block below).
-    # NOT digest-pinned (#72) -- deliberately (jaeger, opt-in otel profile, also rides its tag). o3:o3 is a single
+    # Digest-pinned (#72) as of 2026-08-05. The earlier pin attempt died because o3:o3 is a
     # moving tag rebuilt per lh-radiology pipeline, and GitLab's registry garbage-collects
-    # manifests that lose their tag: a pinned digest 404s (MANIFEST_UNKNOWN) after the next
-    # upstream push, so on any fresh host `up` cannot pull and the whole stack is dead (verified
-    # live against the registry -- the previously pinned digest is already gone). The digest pin
-    # only ever worked here via the local image cache + pull_policy: missing. Drift protection
-    # for this image needs an immutable per-commit tag from lh-radiology CI (upstream change);
-    # until then the tag rides, and a digest would be worse than drift.
-    image: registry.gitlab.com/librehealth/radiology/lh-radiology/o3:o3
+    # manifests that lose their last tag: the pinned digest 404d (MANIFEST_UNKNOWN) after the
+    # next upstream push. A digest stays pullable only while SOME tag references it, so the
+    # precondition stated here previously (an immutable tag upstream) now exists: o3-20260714
+    # references this exact manifest and nothing ever re-pushes it. The digest is the
+    # 2026-07-14 multiarch build, validated 2026-08-05 by a clean-volume arm64 boot (9m2s to
+    # an authenticated session). To bump: tag the new list digest immutably in the
+    # lh-radiology registry FIRST, then update this line; never pin a digest that only the
+    # moving o3:o3 tag references.
+    image: registry.gitlab.com/librehealth/radiology/lh-radiology/o3:o3-20260714@sha256:9116f73133e1f31784009a675f3e32102f4263b4c8693ebb856f049d56823794
     pull_policy: missing                  # `up` pulls the published image; build only on `compose build`
     build:
       context: ../lh-radiology            # sibling checkout of lh-radiology (o3 branch)
