@@ -62,6 +62,58 @@ async def test_critical_flag_without_documented_communication_fails():
     assert any(i["ruleId"] == "critical-comm-required" for i in out["issues"])
 
 
+# --- evidence polarity (#92): each of these four bodies satisfied the keyword-only cut of the
+#     rule. A negated, failed, promised, or anamnestic mention is NOT documentation. ------------
+
+_CRITICAL_IMPRESSION = {"impressionText": "Large left pneumothorax.",
+                        "criticalFlags": [{"label": "pneumothorax", "severity": "critical"}],
+                        "recommendations": []}
+
+
+async def _verify_body(conclusion: str) -> dict:
+    out = await handle("report.verify", {
+        "studyContext": SAMPLE_CONTEXT,
+        "impression": _CRITICAL_IMPRESSION,
+        "report": {"conclusion": conclusion},
+    })
+    validate_skill_output("report.verify", out)
+    return out
+
+
+async def test_negated_communication_is_not_evidence():
+    out = await _verify_body("FINDINGS:\n\nLarge left pneumothorax.\n\n"
+                             "IMPRESSION:\n\nLarge left pneumothorax. "
+                             "The referring team was not notified.")
+    assert any(i["ruleId"] == "critical-comm-required" for i in out["issues"])
+
+
+async def test_failed_communication_attempt_is_not_evidence():
+    out = await _verify_body("IMPRESSION: Large left pneumothorax. "
+                             "We were unable to reach the ordering physician by telephone.")
+    assert any(i["ruleId"] == "critical-comm-required" for i in out["issues"])
+
+
+async def test_future_tense_communication_is_not_evidence():
+    out = await _verify_body("IMPRESSION: Large left pneumothorax. "
+                             "Findings will be communicated to the team.")
+    assert any(i["ruleId"] == "critical-comm-required" for i in out["issues"])
+
+
+async def test_history_mention_cannot_satisfy_the_rule():
+    out = await _verify_body("CLINICAL HISTORY: Family informed of biopsy plan last week.\n\n"
+                             "FINDINGS:\n\nLarge left pneumothorax.\n\n"
+                             "IMPRESSION:\n\nLarge left pneumothorax.")
+    assert any(i["ruleId"] == "critical-comm-required" for i in out["issues"])
+
+
+async def test_failed_then_successful_communication_is_evidence():
+    # The failed attempt and the successful call are separate clauses; the second one counts.
+    out = await _verify_body("IMPRESSION: Large left pneumothorax.\n\n"
+                             "NOTIFICATION: Unable to reach Dr. A; findings discussed with "
+                             "covering physician Dr. B by telephone at 14:05.")
+    assert not any(i["ruleId"] == "critical-comm-required" for i in out["issues"])
+
+
 # --- report-body parsing feeds the PI rules (#22). An inline `conclusion` stands in for the fhir2
 #     fetch so these stay hermetic (the handler prefers it over a network read). -----------------
 
