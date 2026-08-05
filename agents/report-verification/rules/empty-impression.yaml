@@ -1,0 +1,16 @@
+id: empty-impression
+severity: WARN
+description: >
+  An impression should carry text. Fires when impressionText is empty, and
+  DELIBERATELY also when the impression input is absent entirely (a missing
+  path resolves as empty): for a post-sign safety net both states are the same
+  hazard, a report with no impression text to review, and WARN only requests
+  human review rather than gating. The stricter fire-only-when-present variant
+  would need a custom Python rule for no added safety (#44). Distinct from the
+  impression_section_present custom rule, which checks the SIGNED BODY's
+  IMPRESSION section; this one checks the pipeline's impression payload.
+when:
+  field: impression.impressionText
+  op: empty
+message: "Impression text is empty."
+location: impression.impressionText

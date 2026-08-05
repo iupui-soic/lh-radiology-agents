@@ -114,6 +114,37 @@ async def test_failed_then_successful_communication_is_evidence():
     assert not any(i["ruleId"] == "critical-comm-required" for i in out["issues"])
 
 
+# --- empty-impression (#44): blank or absent impression text WARNs. Absent-fires-too is the
+#     decided behavior (see the rule's description): for a safety net both states mean there is
+#     no impression text to review, and WARN requests review without gating. ---------------------
+
+
+async def test_empty_impression_text_warns():
+    out = await handle("report.verify", {
+        "studyContext": SAMPLE_CONTEXT,
+        "impression": {"impressionText": "", "criticalFlags": [], "recommendations": []},
+    })
+    validate_skill_output("report.verify", out)
+    assert out["verificationStatus"] == "WARN"
+    assert out["requiresHumanReview"] is True
+    assert any(i["ruleId"] == "empty-impression" for i in out["issues"])
+
+
+async def test_absent_impression_input_also_warns():
+    out = await handle("report.verify", {"studyContext": SAMPLE_CONTEXT})
+    validate_skill_output("report.verify", out)
+    assert any(i["ruleId"] == "empty-impression" for i in out["issues"])
+
+
+async def test_normal_impression_text_does_not_warn():
+    out = await handle("report.verify", {
+        "studyContext": SAMPLE_CONTEXT,
+        "impression": {"impressionText": "No acute findings.", "criticalFlags": [], "recommendations": []},
+    })
+    validate_skill_output("report.verify", out)
+    assert not any(i["ruleId"] == "empty-impression" for i in out["issues"])
+
+
 # --- report-body parsing feeds the PI rules (#22). An inline `conclusion` stands in for the fhir2
 #     fetch so these stay hermetic (the handler prefers it over a network read). -----------------
 
