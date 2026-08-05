@@ -12,8 +12,10 @@
 #
 # The docker + dind pairing below mirrors lh-radiology's o3 build job, the one configuration
 # proven to build and push on this group runner (docker executor, privileged, linux/amd64,
-# which matches the demo host arch). Pinning these two images by digest (#72 discipline) is
-# deferred until the lane has run green once, then a follow-up commit pins what worked.
+# which matches the demo host arch). Both are pinned (#72 discipline) to the digest that ran
+# green in pipeline 2733426824; digest wins, the tags are labels. The two tags resolve to the
+# SAME digest because the modern docker image ships the daemon and the dind entrypoint in one
+# image. The service alias is explicit so the pinned name still resolves as tcp://docker.
 
 # Publish rules shared by every image job. Anchors, not extends: each job needs its own
 # rules list anyway for its per-image changes: globs, and rules: on a job replaces the
@@ -31,9 +33,10 @@
 .build-image:
   stage: build
   tags: [docker]
-  image: docker:latest
+  image: docker:latest@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c
   services:
-    - docker:dind
+    - name: docker:dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c
+      alias: docker
   variables:
     DOCKER_BUILDKIT: '1'
     BUILD_CONTEXT: '.'
