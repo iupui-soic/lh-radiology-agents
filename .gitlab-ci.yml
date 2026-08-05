@@ -7,10 +7,14 @@ stages:
   - validate
   - test
   - secret-detection
+  - build
 
 include:
   - template: Security/SAST.gitlab-ci.yml
   - template: Security/Secret-Detection.gitlab-ci.yml
+  # Image build and publish lane (#97). Lives in its own file so its jobs' rules:changes
+  # can key on that file alone: editing a test lane here must not rebuild ten images.
+  - local: ci/images.gitlab-ci.yml
 
 variables:
   SECRET_DETECTION_ENABLED: 'true'
@@ -23,6 +27,10 @@ workflow:
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    # Release tags (vX.Y.Z) get a pipeline solely for the image publish lane (#97). Every
+    # other job keys off .default-rules, which matches neither condition, so a tag pipeline
+    # runs only the image jobs. Tags are cut from main, which already ran the full suite.
+    - if: '$CI_COMMIT_TAG'
 
 # A job that extends this runs in MR pipelines AND on the default branch. Jobs without rules
 # default to branch/tag pipelines only and are silently skipped in merge_request_event
