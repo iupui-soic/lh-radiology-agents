@@ -33,23 +33,15 @@ services:
     #     registry.gitlab.com/librehealth/radiology/lh-radiology/o3:o3   (docker pull, no auth)
     #   Build from source instead (module developers): clone lh-radiology on the o3 branch as a
     #   sibling of this repo, then `docker compose build openmrs` (uses the build: block below).
-    # Digest-pinned (#72) as of 2026-08-05. The earlier pin attempt died because o3:o3 is a
+    # NOT digest-pinned (#72) -- deliberately (jaeger, opt-in otel profile, also rides its tag). o3:o3 is a single
     # moving tag rebuilt per lh-radiology pipeline, and GitLab's registry garbage-collects
-    # manifests that lose their last tag: the pinned digest 404d (MANIFEST_UNKNOWN) after the
-    # next upstream push. A digest stays pullable only while SOME tag references it, so the
-    # precondition stated here previously (an immutable tag upstream) now exists: o3-20260714
-    # references this exact manifest and nothing ever re-pushes it. The digest is the
-    # 2026-07-14 multiarch build, validated 2026-08-05 by a clean-volume arm64 boot (9m2s to
-    # an authenticated session). To bump: tag the new list digest immutably in the
-    # lh-radiology registry FIRST, then update this line; never pin a digest that only the
-    # moving o3:o3 tag references.
-    # The pin rides the TAG, not a @sha256 suffix, because this service also has a build:
-    # block and compose tags source builds with this exact name; a name carrying a digest
-    # breaks `docker compose build openmrs` and `up --build` with "build tag cannot contain
-    # a digest". The tag is never re-pushed, so it is equivalent in practice; the manifest it
-    # references is sha256:9116f73133e1f31784009a675f3e32102f4263b4c8693ebb856f049d56823794
-    # (verify with: docker buildx imagetools inspect <image>).
-    image: registry.gitlab.com/librehealth/radiology/lh-radiology/o3:o3-20260714
+    # manifests that lose their tag: a pinned digest 404s (MANIFEST_UNKNOWN) after the next
+    # upstream push, so on any fresh host `up` cannot pull and the whole stack is dead (verified
+    # live against the registry -- the previously pinned digest is already gone). The digest pin
+    # only ever worked here via the local image cache + pull_policy: missing. Drift protection
+    # for this image needs an immutable per-commit tag from lh-radiology CI (upstream change);
+    # until then the tag rides, and a digest would be worse than drift.
+    image: registry.gitlab.com/librehealth/radiology/lh-radiology/o3:o3
     pull_policy: missing                  # `up` pulls the published image; build only on `compose build`
     build:
       context: ../lh-radiology            # sibling checkout of lh-radiology (o3 branch)
@@ -163,7 +155,6 @@ services:
   # nginx also proxies /reading-api/* -> worklist-api and /orchestrator-api/*
   # -> ingress so the browser stays same-origin (no CORS on either service).
   ohif:
-    image: registry.gitlab.com/librehealth/radiology/lh-radiology-agents/ohif:${APP_IMAGE_TAG:-main}
     build:
       context: .
       dockerfile: integrations/ohif-extension/Dockerfile
@@ -298,14 +289,6 @@ services:
 
   # --- Application services (M1) -------------------------------------------------
   orchestrator:
-    # Every app service names its CI-published image (#97) alongside its build: block (#98).
-    # Dev flow is UNCHANGED: with build: present compose defaults to pull_policy build, so
-    # `up`/`compose build` still build from the checkout. The demo host deploys by pulling
-    # instead: `docker compose pull <app services> && up -d --no-deps <app services>` (see the
-    # run-book's deploy-window section). APP_IMAGE_TAG steers the tag: `main`, a short SHA, or
-    # a vX.Y.Z release tag, so the running demo is attributable to an exact published image.
-    # Pulls are anonymous (public project registry); no token or login on the host.
-    image: registry.gitlab.com/librehealth/radiology/lh-radiology-agents/orchestrator:${APP_IMAGE_TAG:-main}
     build: { context: ., dockerfile: orchestrator/Dockerfile }
     # `wait -n` exits when either the worker or the ingress dies, so `restart` recovers the
     # container. worker.py retries the Temporal connect while temporal is still booting.
@@ -324,17 +307,8 @@ services:
       FHIR2_ALLOW_INSECURE_WRITE: "1"
       # Live fhir2 401s unauthenticated reads and the callers swallow fhir2 errors by design,
       # so missing credentials fail SILENTLY (#53). Dev-stack values = the o3 admin account.
-      # Two-account split (#75/#30): FHIR2_BASIC_* is the WRITER identity (the pre-sign draft
-      # here, the inbox write on communications, the sign flip on ris-sign-bridge), scoped on
-      # the demo host to clinical reads plus Add/Edit Observations, the narrowest OpenMRS
-      # privilege pair covering Obs-backed DiagnosticReport create/update. The fetch-only
-      # agents (ehr-assistant, impression-generation, report-verification) ride FHIR2_RO_*,
-      # whose default nests onto the writer creds and then admin, so a dev stack with nothing
-      # set behaves exactly as before. On the host the two pairs point at radagent-svc /
-      # radagent-ro, and a write under the read-only account is refused by OpenMRS naming the
-      # missing privileges (live-verified 2026-08-05).
-      FHIR2_BASIC_USER: ${FHIR2_BASIC_USER:-admin}
-      FHIR2_BASIC_PASS: ${FHIR2_BASIC_PASS:-Admin123}
+      FHIR2_BASIC_USER: admin
+      FHIR2_BASIC_PASS: Admin123
       # Pre-sign impression draft (#26) codes its DiagnosticReport with a real OpenMRS Concept
       # (fhir2 rejects a text-only code with codeRequired). Default is the LH-Radiology "AI pre-sign
       # impression draft" concept, provisioned into the o3 concept dictionary at stack startup by
@@ -366,7 +340,6 @@ services:
     depends_on: [temporal, openmrs, orthanc]
 
   worklist-triage:
-    image: registry.gitlab.com/librehealth/radiology/lh-radiology-agents/worklist-triage:${APP_IMAGE_TAG:-main}
     build: { context: ., dockerfile: agents/worklist-triage/Dockerfile }
     ports: ["8101:8101"]
     environment:
@@ -375,20 +348,18 @@ services:
   # needs the same credentials as the orchestrator (#53); without them every read 401s and the
   # whole EHR context packet silently degrades to empty.
   ehr-assistant:
-    image: registry.gitlab.com/librehealth/radiology/lh-radiology-agents/ehr-assistant:${APP_IMAGE_TAG:-main}
     build: { context: ., dockerfile: agents/ehr-assistant/Dockerfile }
     ports: ["8102:8102"]
     environment:
       <<: *otel-env
-      FHIR2_BASIC_USER: ${FHIR2_RO_USER:-${FHIR2_BASIC_USER:-admin}}
-      FHIR2_BASIC_PASS: ${FHIR2_RO_PASS:-${FHIR2_BASIC_PASS:-Admin123}}
+      FHIR2_BASIC_USER: admin
+      FHIR2_BASIC_PASS: Admin123
       # Read-only fhir2 consumer: the #67 read-transport guard refuses plaintext-to-remote reads
       # without an opt-in, and this hop is plaintext http to the in-compose openmrs (same accepted
       # posture as the orchestrator's FHIR2_ALLOW_INSECURE_WRITE note; a real deployment uses an
       # https FHIR2_BASE_URL instead). READ, not WRITE: this service never writes.
       FHIR2_ALLOW_INSECURE_READ: "1"
   interpretation-assistant:
-    image: registry.gitlab.com/librehealth/radiology/lh-radiology-agents/interpretation-assistant:${APP_IMAGE_TAG:-main}
     build: { context: ., dockerfile: agents/interpretation-assistant/Dockerfile }
     ports: ["8103:8103"]
     environment:
@@ -397,13 +368,12 @@ services:
   # credentials as the orchestrator (#53) — without them every fetch 401s and silently degrades
   # to "no critical detection".
   impression-generation:
-    image: registry.gitlab.com/librehealth/radiology/lh-radiology-agents/impression-generation:${APP_IMAGE_TAG:-main}
     build: { context: ., dockerfile: agents/impression-generation/Dockerfile }
     ports: ["8104:8104"]
     environment:
       <<: *otel-env
-      FHIR2_BASIC_USER: ${FHIR2_RO_USER:-${FHIR2_BASIC_USER:-admin}}
-      FHIR2_BASIC_PASS: ${FHIR2_RO_PASS:-${FHIR2_BASIC_PASS:-Admin123}}
+      FHIR2_BASIC_USER: admin
+      FHIR2_BASIC_PASS: Admin123
       # Read-only fhir2 consumer: the #67 read-transport guard refuses plaintext-to-remote reads
       # without an opt-in, and this hop is plaintext http to the in-compose openmrs (same accepted
       # posture as the orchestrator's FHIR2_ALLOW_INSECURE_WRITE note; a real deployment uses an
@@ -413,13 +383,12 @@ services:
   # report.body (laterality, sections, BI-RADS, density) for the PI rules — same credentials as
   # impression-generation; without them every fetch 401s and the body rules silently stay inert.
   report-verification:
-    image: registry.gitlab.com/librehealth/radiology/lh-radiology-agents/report-verification:${APP_IMAGE_TAG:-main}
     build: { context: ., dockerfile: agents/report-verification/Dockerfile }
     ports: ["8105:8105"]
     environment:
       <<: *otel-env
-      FHIR2_BASIC_USER: ${FHIR2_RO_USER:-${FHIR2_BASIC_USER:-admin}}
-      FHIR2_BASIC_PASS: ${FHIR2_RO_PASS:-${FHIR2_BASIC_PASS:-Admin123}}
+      FHIR2_BASIC_USER: admin
+      FHIR2_BASIC_PASS: Admin123
       # Read-only fhir2 consumer: the #67 read-transport guard refuses plaintext-to-remote reads
       # without an opt-in, and this hop is plaintext http to the in-compose openmrs (same accepted
       # posture as the orchestrator's FHIR2_ALLOW_INSECURE_WRITE note; a real deployment uses an
@@ -431,7 +400,6 @@ services:
   # Pranathi's file - separate follow-up). SQLite priority store is volume-mounted for durability
   # across restart, mirroring the ingress_store pattern in orchestrator/.
   worklist-api:
-    image: registry.gitlab.com/librehealth/radiology/lh-radiology-agents/worklist-api:${APP_IMAGE_TAG:-main}
     build: { context: ., dockerfile: integrations/worklist-api/Dockerfile }
     ports: ["8107:8107"]
     environment:
@@ -449,7 +417,6 @@ services:
   # failed too. Reads clinical context from fhir2 (read-only), writes Communication/Task to the
   # comms ledger, resolves on-call from the directory the one-shot below seeds.
   communications:
-    image: registry.gitlab.com/librehealth/radiology/lh-radiology-agents/communications:${APP_IMAGE_TAG:-main}
     build:
       context: .
       dockerfile: agents/communications/Dockerfile
@@ -461,8 +428,8 @@ services:
       <<: *otel-env
       COMMS_LEDGER_BASE_URL: http://comms-ledger:8080/fhir
       FHIR2_BASE_URL: http://openmrs:8080/openmrs/ws/fhir2/R4
-      FHIR2_BASIC_USER: ${FHIR2_BASIC_USER:-admin}
-      FHIR2_BASIC_PASS: ${FHIR2_BASIC_PASS:-Admin123}
+      FHIR2_BASIC_USER: admin
+      FHIR2_BASIC_PASS: Admin123
       # Read-only fhir2 consumer (ServiceRequest.requester): the #67 read-transport guard refuses
       # plaintext-to-remote reads without an opt-in, and this hop is plaintext http to the
       # in-compose openmrs (see the orchestrator's FHIR2_ALLOW_INSECURE_WRITE note; a real
@@ -537,15 +504,18 @@ services:
   # final) -- identical downstream effect to the missing emit. Remove when the module fix
   # lands in the o3 sibling repo. Plaintext in-compose fhir2 hop, same posture as the ETL.
   ris-sign-bridge:
-    image: registry.gitlab.com/librehealth/radiology/lh-radiology-agents/ris-sign-bridge:${APP_IMAGE_TAG:-main}
     build: { context: scripts/mimic, dockerfile: Dockerfile }
     command: python3 ris_sign_bridge.py
     environment:
       FHIR2_BASE_URL: http://openmrs:8080/openmrs/ws/fhir2/R4
-      # Passthrough, not literals (#93): the #75 least-privilege fhir2 account slots in via
-      # env without editing this file. Dev default stays admin.
-      FHIR2_BASIC_USER: ${FHIR2_BASIC_USER:-admin}
-      FHIR2_BASIC_PASS: ${FHIR2_BASIC_PASS:-Admin123}
+      FHIR2_BASIC_USER: admin
+      FHIR2_BASIC_PASS: Admin123
+      # Kept in lockstep with the orchestrator's FHIR2_PRESIGN_REPORT_CONCEPT
+      # (line ~319) per @sunbiz's !107 review. ris-sign-bridge reads this to
+      # AVOID flipping the AI's presign draft to `final` when it projects a
+      # radiologist's signed report (the #89 fix in !112). Same value both
+      # services see, deployment-time move keeps them aligned.
+      FHIR2_PRESIGN_REPORT_CONCEPT: e3641471-3f25-57b4-ab27-a3ebc66e481e
     depends_on:
       mariadb:
         condition: service_started
@@ -565,10 +535,10 @@ services:
       FHIR2_BASIC_USER: admin
       FHIR2_BASIC_PASS: Admin123
       # Kept in lockstep with the orchestrator's FHIR2_PRESIGN_REPORT_CONCEPT
-      # (line ~319) per @sunbiz's !107 review. If a deployment moves the AI
-      # concept there, this bridge follows via the same knob -- otherwise the
-      # bridge would silently stop matching AI DiagnosticReports and the
-      # Diagnosis field would come up empty with no error to see why.
+      # (line ~319) per @sunbiz's !107 review. ris-presign-bridge reads this to
+      # MATCH the AI's presign draft in fhir2 so it can project the conclusion
+      # into `radiology_report`. Same value both bridges see, deployment-time
+      # move keeps them aligned.
       FHIR2_PRESIGN_REPORT_CONCEPT: e3641471-3f25-57b4-ab27-a3ebc66e481e
     depends_on:
       mariadb:

@@ -6,7 +6,8 @@
   // merged (the earlier /etc/orthanc/lh-radiology.json mount was silently ignored
   // -- PythonScript never registered and OnStableStudy never fired; !107 review).
   // This file therefore replaces the image's default orthanc.json, so any setting
-  // we need for the stack (DICOMweb, HTTP, plugin config) has to be declared here.
+  // we need for the stack (DICOMweb, storage paths, HTTP, plugin config) has to
+  // be declared here rather than inherited.
   "Name": "lh-radiology",
 
   // Dev only: no HTTP auth so the OHIF viewer (proxied same-origin) can query freely.
@@ -20,6 +21,16 @@
     "EnableWado": true,
     "WadoRoot": "/wado"
   },
+
+  // Persistence paths declared explicitly (@sunbiz's !107 review). Since this
+  // file replaces the image's default orthanc.json rather than sitting beside it,
+  // we cannot rely on the built-in default matching the compose volume mount
+  // (`orthanc-db:/var/lib/orthanc/db`). Without these two settings a future
+  // Orthanc image change could fall back to a relative path that the volume does
+  // not cover, and studies would quietly not survive `docker compose restart
+  // orthanc`. Belt-and-suspenders.
+  "StorageDirectory": "/var/lib/orthanc/db",
+  "IndexDirectory": "/var/lib/orthanc/db",
 
   // OnStableStudy -> orchestrator webhook (integrations/orthanc-plugin/orthanc_stable_study.py).
   // The orthancteam image ships the Python plugin built-in and auto-enables it as soon as

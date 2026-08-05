@@ -68,7 +68,13 @@ SERVICE_USER_SYSTEM_ID = os.environ.get(
 
 
 def connect_db():
-    """Fresh pymysql connection, matching ris_sign_bridge's config surface."""
+    """Fresh pymysql connection, matching ris_sign_bridge's config surface.
+
+    ``autocommit=True`` is the default for INSERT/UPDATE of ``radiology_report``
+    rows (single-statement, order-scoped, safe under a rare double-fire). The
+    initial service-user bootstrap flips this off for the multi-statement
+    person + person_name + users triple; see ``ensure_service_user``.
+    """
     return pymysql.connect(
         host=os.environ.get("OMRS_DB_HOST", "mariadb"),
         port=int(os.environ.get("OMRS_DB_PORT", "3306")),
@@ -94,6 +100,12 @@ def ensure_service_user(conn) -> int:
     is the only user guaranteed to exist at bridge boot. From then on, the bridge
     stamps its own writes to the new user.
 
+    The three INSERTs run as a single transaction (autocommit temporarily off,
+    explicit commit/rollback) per @sunbiz's !107 review: a partial failure would
+    otherwise orphan a `person` row -- retry then produces a second orphan and only
+    the third try creates a complete triple, leaving two dangling persons in the
+    audit tables. With the transaction the retry is clean-slate.
+
     No role assignment: this account is never intended for interactive login. If a
     deployment provisions the user out-of-band (via bootstrap or by hand) with the
     same system_id, this function finds it and skips the INSERT.
@@ -107,39 +119,51 @@ def ensure_service_user(conn) -> int:
         if row:
             return row[0]
 
-        # Create person
-        person_uuid = str(uuid.uuid4())
-        cur.execute(
-            "INSERT INTO person (gender, dead, creator, date_created, uuid, voided) "
-            "VALUES ('M', 0, 1, NOW(), %s, 0)",
-            (person_uuid,),
-        )
-        person_id = cur.lastrowid
+    # Multi-statement bootstrap: switch to explicit transaction so a partial
+    # failure rolls back the whole triple rather than orphaning a person row.
+    conn.autocommit(False)
+    try:
+        with conn.cursor() as tx:
+            # Create person
+            person_uuid = str(uuid.uuid4())
+            tx.execute(
+                "INSERT INTO person (gender, dead, creator, date_created, uuid, voided) "
+                "VALUES ('M', 0, 1, NOW(), %s, 0)",
+                (person_uuid,),
+            )
+            person_id = tx.lastrowid
 
-        # Create person_name
-        name_uuid = str(uuid.uuid4())
-        cur.execute(
-            "INSERT INTO person_name "
-            "(person_id, preferred, given_name, family_name, creator, date_created, uuid, voided) "
-            "VALUES (%s, 1, %s, %s, 1, NOW(), %s, 0)",
-            (person_id, "AI", "Presign Bridge", name_uuid),
-        )
+            # Create person_name
+            name_uuid = str(uuid.uuid4())
+            tx.execute(
+                "INSERT INTO person_name "
+                "(person_id, preferred, given_name, family_name, creator, date_created, uuid, voided) "
+                "VALUES (%s, 1, %s, %s, 1, NOW(), %s, 0)",
+                (person_id, "AI", "Presign Bridge", name_uuid),
+            )
 
-        # Create users row
-        user_uuid = str(uuid.uuid4())
-        cur.execute(
-            "INSERT INTO users "
-            "(system_id, username, person_id, creator, date_created, uuid, retired) "
-            "VALUES (%s, %s, %s, 1, NOW(), %s, 0)",
-            (SERVICE_USER_SYSTEM_ID, SERVICE_USER_SYSTEM_ID, person_id, user_uuid),
-        )
-        new_user_id = cur.lastrowid
-        print(
-            f"  provisioned service user system_id={SERVICE_USER_SYSTEM_ID} "
-            f"user_id={new_user_id} person_id={person_id}",
-            flush=True,
-        )
-        return new_user_id
+            # Create users row
+            user_uuid = str(uuid.uuid4())
+            tx.execute(
+                "INSERT INTO users "
+                "(system_id, username, person_id, creator, date_created, uuid, retired) "
+                "VALUES (%s, %s, %s, 1, NOW(), %s, 0)",
+                (SERVICE_USER_SYSTEM_ID, SERVICE_USER_SYSTEM_ID, person_id, user_uuid),
+            )
+            new_user_id = tx.lastrowid
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.autocommit(True)
+
+    print(
+        f"  provisioned service user system_id={SERVICE_USER_SYSTEM_ID} "
+        f"user_id={new_user_id} person_id={person_id}",
+        flush=True,
+    )
+    return new_user_id
 
 
 def order_id_for_uuid(conn, order_uuid: str):
@@ -237,28 +261,49 @@ def service_request_uuid(resource: dict):
     return None
 
 
-def poll_fhir_reports(c: OmrsClient, cursor_iso: str) -> list:
+def poll_fhir_reports(c: OmrsClient, cursor_iso: str) -> tuple[list, str]:
     """AI-authored preliminary DiagnosticReports updated since `cursor_iso`.
+
+    Returns (matching_reports, latest_lastUpdated_from_raw_bundle).
 
     fhir2 doesn't accept `status` as a search parameter on this build (400s), same
     as the ris_sign_bridge design note observes. So we search by `_lastUpdated`
     only and filter client-side on both status and our concept stamp.
+
+    The latest lastUpdated returned is derived from the RAW bundle -- every
+    resource we saw, not just the ones that survived filtering -- per @sunbiz's
+    !107 review. If we only advanced the cursor from filtered matches, a page of
+    50 non-matching resources (a burst of `final` DiagnosticReports as radiologists
+    sign, or humans' own preliminary drafts) would leave the cursor stuck and we
+    would refetch the same page every 10s forever, never seeing anything past it.
+    At cohort scale that scenario is likely rather than theoretical.
     """
     bundle = c._fget(
         "DiagnosticReport",
         {"_lastUpdated": f"ge{cursor_iso}", "_sort": "_lastUpdated", "_count": "50"},
     )
-    out = []
+    matching: list = []
+    latest_lu = cursor_iso  # only ever advances forward
     for entry in bundle.get("entry", []) or []:
         r = entry.get("resource") or {}
         if r.get("resourceType") != "DiagnosticReport":
             continue
+
+        # Advance the cursor from the RAW stream so non-matching resources still
+        # move it forward -- otherwise a page with no AI-stamped preliminary
+        # wedges the poll cycle. Doing this before the status/stamp filter is the
+        # whole point of the fix.
+        lu = (r.get("meta") or {}).get("lastUpdated")
+        if lu and lu > latest_lu:
+            latest_lu = lu
+
+        # Now filter for what we actually want to bridge.
         if r.get("status") != "preliminary":
             continue
         if not has_our_stamp(r):
             continue
-        out.append(r)
-    return out
+        matching.append(r)
+    return matching, latest_lu
 
 
 def bridge_report(conn, resource: dict, service_user_id: int) -> str:
@@ -325,7 +370,7 @@ def main() -> None:
                 service_user_id = ensure_service_user(conn)
                 print(f"  service user id: {service_user_id}", flush=True)
 
-            reports = poll_fhir_reports(c, cursor_iso)
+            reports, latest_lu = poll_fhir_reports(c, cursor_iso)
             for r in reports:
                 try:
                     outcome = bridge_report(conn, r, service_user_id)
@@ -333,10 +378,10 @@ def main() -> None:
                 except Exception as e:  # noqa: BLE001 -- keep the bridge alive per-item
                     print(f"  {r.get('id', '?')}: ERROR {e!r}", flush=True)
 
-                # Advance cursor to the latest we saw (fhir2 returns ascending by _sort).
-                lu = (r.get("meta") or {}).get("lastUpdated")
-                if lu and lu > cursor_iso:
-                    cursor_iso = lu
+            # Advance the cursor once per cycle, from the raw-bundle max, so a
+            # page of non-matching resources still moves us forward.
+            if latest_lu > cursor_iso:
+                cursor_iso = latest_lu
         except Exception as e:  # noqa: BLE001 -- transient outages must not kill the bridge
             print(f"bridge cycle error: {e!r}", flush=True)
             conn = None
