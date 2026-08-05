@@ -43,7 +43,13 @@ services:
     # an authenticated session). To bump: tag the new list digest immutably in the
     # lh-radiology registry FIRST, then update this line; never pin a digest that only the
     # moving o3:o3 tag references.
-    image: registry.gitlab.com/librehealth/radiology/lh-radiology/o3:o3-20260714@sha256:9116f73133e1f31784009a675f3e32102f4263b4c8693ebb856f049d56823794
+    # The pin rides the TAG, not a @sha256 suffix, because this service also has a build:
+    # block and compose tags source builds with this exact name; a name carrying a digest
+    # breaks `docker compose build openmrs` and `up --build` with "build tag cannot contain
+    # a digest". The tag is never re-pushed, so it is equivalent in practice; the manifest it
+    # references is sha256:9116f73133e1f31784009a675f3e32102f4263b4c8693ebb856f049d56823794
+    # (verify with: docker buildx imagetools inspect <image>).
+    image: registry.gitlab.com/librehealth/radiology/lh-radiology/o3:o3-20260714
     pull_policy: missing                  # `up` pulls the published image; build only on `compose build`
     build:
       context: ../lh-radiology            # sibling checkout of lh-radiology (o3 branch)
