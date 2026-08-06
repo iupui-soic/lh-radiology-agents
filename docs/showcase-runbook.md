@@ -156,12 +156,22 @@ the drift class behind #83 cannot recur. Only in an announced window, never mid-
    lists one and forgets the other leaves half the RIS bridge on an old build.
    `--no-deps` is load-bearing: the stateful set (openmrs, mariadb, orthanc and its volume,
    temporal's postgres, the comms ledger) is never touched by a deploy.
-3. Pin what reviewers see: `APP_IMAGE_TAG=vX.Y.Z` (or a short SHA for an urgent fix) in the
+3. **Restart `ohif` last, every time, even when its own image did not change** (#104):
+   ```bash
+   docker compose -f docker-compose.yml -f docker-compose.tls.yml restart ohif
+   ```
+   OHIF's nginx resolves `worklist-api`, `orthanc` and `orchestrator` once at container start and
+   holds those IPs. A recreated upstream gets a NEW ip, so nginx keeps dialling the old one and
+   `/reading` answers 502 while every other check passes: the API is healthy, Caddy reaches it,
+   the rows are all there. On 2026-08-06 that cost four and a half hours of a dead reading
+   worklist, unnoticed because the deploy was verified through the API instead of the page.
+4. Pin what reviewers see: `APP_IMAGE_TAG=vX.Y.Z` (or a short SHA for an urgent fix) in the
    host env steers which published tag the pull fetches; unset means `main`. Pulls are
    anonymous -- the project registry is public, the host needs no token.
-4. Smoke: §1.6 (proxy 401, `/reading` lists the cohort, one seeder `finalize` releases a
-   study end to end), then §2's arc 1 once, quickly.
-5. Log the deploy (date, tag, operator) in the demo diary next to the rehearsal notes.
+5. Smoke: §1.6 (proxy 401, `/reading` lists the cohort, one seeder `finalize` releases a
+   study end to end), then §2's arc 1 once, quickly. **Load `/reading` in a browser** -- an API
+   check is not a substitute, see step 3.
+6. Log the deploy (date, tag, operator) in the demo diary next to the rehearsal notes.
 
 **Bumping the o3 image pin is a different animal from an app deploy.** It recreates `openmrs`,
 so the RIS is down for the whole boot and the app services above ride out an unavailable fhir2
