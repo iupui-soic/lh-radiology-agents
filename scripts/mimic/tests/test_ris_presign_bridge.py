@@ -278,7 +278,7 @@ def test_bridge_report_updates_when_empty_draft(monkeypatch):
     # A DRAFT row with no body -- the module-side UI created it (e.g. user opened
     # the report form) but nobody has typed anything. Safe to fill in.
     monkeypatch.setattr(bridge, "order_id_for_uuid", lambda conn, u: 42)
-    monkeypatch.setattr(bridge, "existing_report", lambda conn, oid: (5, "DRAFT", None))
+    monkeypatch.setattr(bridge, "existing_report", lambda conn, oid: (5, "DRAFT", None, 7, None))
     update_calls = []
     monkeypatch.setattr(bridge, "update_draft_body",
                         lambda conn, rid, body, uid: update_calls.append((rid, body, uid)))
@@ -295,7 +295,7 @@ def test_bridge_report_skip_touched_when_radiologist_typed(monkeypatch):
     # they have not hit Complete. HANDS OFF: never overwrite their own work.
     monkeypatch.setattr(bridge, "order_id_for_uuid", lambda conn, u: 42)
     monkeypatch.setattr(bridge, "existing_report",
-                        lambda conn, oid: (5, "DRAFT", "Radiologist typed this by hand"))
+                        lambda conn, oid: (5, "DRAFT", "Radiologist typed this by hand", 99, 99))
     _drop_sql(monkeypatch, "insert_draft")
     _drop_sql(monkeypatch, "update_draft_body")
 
@@ -309,7 +309,7 @@ def test_bridge_report_skip_touched_when_status_past_draft(monkeypatch):
     # signed off; never touch a signed row even if the body is somehow empty.
     monkeypatch.setattr(bridge, "order_id_for_uuid", lambda conn, u: 42)
     monkeypatch.setattr(bridge, "existing_report",
-                        lambda conn, oid: (5, "COMPLETED", ""))
+                        lambda conn, oid: (5, "COMPLETED", "", 7, 7))
     _drop_sql(monkeypatch, "insert_draft")
     _drop_sql(monkeypatch, "update_draft_body")
 
@@ -323,7 +323,7 @@ def test_bridge_report_noop_when_same_text_already_there(monkeypatch):
     # after the first INSERT hit this over and over, must not spam UPDATEs.
     monkeypatch.setattr(bridge, "order_id_for_uuid", lambda conn, u: 42)
     monkeypatch.setattr(bridge, "existing_report",
-                        lambda conn, oid: (5, "DRAFT", "AI impression text"))
+                        lambda conn, oid: (5, "DRAFT", "AI impression text", 7, 7))
     _drop_sql(monkeypatch, "insert_draft")
     _drop_sql(monkeypatch, "update_draft_body")
 
@@ -423,7 +423,7 @@ def test_a_long_row_we_already_wrote_reads_as_noop_not_as_a_radiologist_edit(mon
     skip-touched, which is the bridge claiming a radiologist edited a row it wrote itself."""
     long_text = "w" * 5000
     monkeypatch.setattr(bridge, "order_id_for_uuid", lambda conn, u: 42)
-    monkeypatch.setattr(bridge, "existing_report", lambda conn, oid: (5, "DRAFT", long_text))
+    monkeypatch.setattr(bridge, "existing_report", lambda conn, oid: (5, "DRAFT", long_text, 7, 7))
     _drop_sql(monkeypatch, "insert_draft")
     _drop_sql(monkeypatch, "update_draft_body")
 
@@ -432,3 +432,51 @@ def test_a_long_row_we_already_wrote_reads_as_noop_not_as_a_radiologist_edit(mon
 
     assert "noop-same-text" in outcome
     assert "skip-touched" not in outcome
+
+
+def test_bridge_report_refreshes_our_own_stale_draft(monkeypatch):
+    # A DRAFT this bridge wrote earlier, whose impression has since changed (#106). Deciding on
+    # the body alone read this as radiologist-authored and backed off forever, so the RIS kept
+    # showing a stale AI draft: 30 studies on the demo host sat on the pre-#103 template.
+    monkeypatch.setattr(bridge, "order_id_for_uuid", lambda conn, u: 42)
+    monkeypatch.setattr(bridge, "existing_report",
+                        lambda conn, oid: (5, "DRAFT", "Older AI impression", 7, 7))
+    update_calls = []
+    monkeypatch.setattr(bridge, "update_draft_body",
+                        lambda conn, rid, body, uid: update_calls.append((rid, body, uid)))
+    _drop_sql(monkeypatch, "insert_draft")
+
+    outcome = bridge.bridge_report(conn=None, resource=_ai_resource(), service_user_id=7)
+
+    assert update_calls == [(5, "AI impression text", 7)]
+    assert "refresh" in outcome and "report_id=5" in outcome
+
+
+def test_bridge_report_refreshes_our_draft_never_changed_since_insert(monkeypatch):
+    # changed_by is NULL on a draft we inserted and never updated: still ours.
+    monkeypatch.setattr(bridge, "order_id_for_uuid", lambda conn, u: 42)
+    monkeypatch.setattr(bridge, "existing_report",
+                        lambda conn, oid: (5, "DRAFT", "Older AI impression", 7, None))
+    update_calls = []
+    monkeypatch.setattr(bridge, "update_draft_body",
+                        lambda conn, rid, body, uid: update_calls.append((rid, body, uid)))
+    _drop_sql(monkeypatch, "insert_draft")
+
+    outcome = bridge.bridge_report(conn=None, resource=_ai_resource(), service_user_id=7)
+
+    assert update_calls == [(5, "AI impression text", 7)]
+    assert "refresh" in outcome
+
+
+def test_bridge_report_never_overwrites_a_radiologist_edit_of_our_draft(monkeypatch):
+    # We created it, a radiologist then edited it: changed_by is theirs. Hands off -- this is the
+    # case the whole creator/changed_by check exists to protect.
+    monkeypatch.setattr(bridge, "order_id_for_uuid", lambda conn, u: 42)
+    monkeypatch.setattr(bridge, "existing_report",
+                        lambda conn, oid: (5, "DRAFT", "Radiologist reworded our draft", 7, 99))
+    _drop_sql(monkeypatch, "insert_draft")
+    _drop_sql(monkeypatch, "update_draft_body")
+
+    outcome = bridge.bridge_report(conn=None, resource=_ai_resource(), service_user_id=7)
+
+    assert "skip-touched" in outcome and "report_id=5" in outcome
