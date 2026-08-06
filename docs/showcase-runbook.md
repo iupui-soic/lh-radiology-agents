@@ -158,6 +158,16 @@ the drift class behind #83 cannot recur. Only in an announced window, never mid-
    study end to end), then §2's arc 1 once, quickly.
 5. Log the deploy (date, tag, operator) in the demo diary next to the rehearsal notes.
 
+**Bumping the o3 image pin is a different animal from an app deploy.** It recreates `openmrs`,
+so the RIS is down for the whole boot and the app services above ride out an unavailable fhir2
+(the orchestrator's poller logs `sign-off detection is stalled` and recovers on its own). Budget
+**about 4 minutes** on a pin at or after `o3-010548c5`, measured 195s to `session` 200 on the
+demo host. Older pins cost ~25 minutes, because the reference demo-data generator ran on every
+boot and built 50 demo patients before the server would answer (#101); if a recreate is still
+taking twenty minutes, the pin predates that fix. `docker compose ... pull openmrs` first so the
+image is local and the outage is just the boot, and take a DB dump before the recreate
+(`scripts/dump_openmrs_seed.sh ~/backups/openmrs-predeploy-<date>.sql.gz`).
+
 ## 7. Recording plan
 
 One continuous 1920×1080 capture per arc, browser only, no dev tools; the phone on camera for
