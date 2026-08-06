@@ -53,17 +53,25 @@ _GENERIC = {
 
 
 def fetch_studies(base_url: str, timeout: float) -> list[dict]:
-    """Every study Orthanc knows, in the lean shape we need. Mirrors orthanc_client."""
+    """Every study Orthanc knows, in the lean shape we need. Mirrors orthanc_client.
+
+    requestedTags is load-bearing (#99, same fix as orthanc_client): a study record's
+    MainDicomTags never carry a modality (Modality is series-level, ModalitiesInStudy is a
+    computed tag returned only when asked), so without it every row audits as modality '?'
+    and select_tools returns nothing for the whole corpus -- the audit reports a registry
+    failure that is actually the audit's own fetch."""
     url = f"{base_url.rstrip('/')}/studies"
     with httpx.Client(timeout=timeout) as c:
-        r = c.get(url, params={"expand": True})
+        r = c.get(url, params={"expand": True, "requestedTags": "ModalitiesInStudy"})
         r.raise_for_status()
         raw = r.json() or []
     out = []
     for s in raw:
         tags = s.get("MainDicomTags") or {}
+        requested = s.get("RequestedTags") or {}
         out.append({
-            "modality": (tags.get("ModalitiesInStudy") or tags.get("Modality") or "").strip(),
+            "modality": (requested.get("ModalitiesInStudy") or tags.get("ModalitiesInStudy")
+                         or tags.get("Modality") or "").strip(),
             "studyDescription": (tags.get("StudyDescription") or "").strip(),
         })
     return out

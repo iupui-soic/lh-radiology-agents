@@ -1,0 +1,28 @@
+{
+  "_provenance": {
+    "source": "scripts/audit_registry_selection.py --json against the M4 showcase Orthanc (#64)",
+    "captured": "2026-08-05",
+    "cohort": "the #68 MIMIC-CXR showcase cohort, 100 studies",
+    "note": "Aggregate protocol names only: distinct (modality, StudyDescription) with counts. No study UIDs, accessions, or per-study data. CXR-only cohort, so this corpus validates the chest/CXR matching; CT names stay covered by the hand-built rows in test_handler.py until real CT studies land (see the PI's #64 caveat)."
+  },
+  "rows": [
+    {
+      "modality": "CR",
+      "studyDescription": "CHEST (PA AND LAT)",
+      "studies": 3,
+      "tools": ["cxr-screen", "pneumothorax-detect"]
+    },
+    {
+      "modality": "DX",
+      "studyDescription": "CHEST (PA AND LAT)",
+      "studies": 41,
+      "tools": ["cxr-screen", "pneumothorax-detect"]
+    },
+    {
+      "modality": "DX",
+      "studyDescription": "CHEST (PORTABLE AP)",
+      "studies": 56,
+      "tools": ["cxr-screen", "pneumothorax-detect"]
+    }
+  ]
+}
