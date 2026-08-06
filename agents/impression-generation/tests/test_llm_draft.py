@@ -455,3 +455,55 @@ async def test_prompt_stays_quiet_about_actions_on_a_normal_study(monkeypatch):
     await draft_impression(conclusion="", finding_labels="", critical_flags=[], ehr_context={})
     sent = seen[0]["body"]["messages"][1]["content"]
     assert "at least one concrete action" not in sent
+
+
+def _responding_sequence(contents):
+    """A transport that answers each POST with the next content in `contents`."""
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(_json.loads(request.content or b"{}"))
+        body = contents[min(len(seen) - 1, len(contents) - 1)]
+        return httpx.Response(200, json={"choices": [{"message": {"content": body}}]})
+
+    return httpx.MockTransport(handler), seen
+
+
+async def test_unparseable_reply_is_retried_once_and_accepted(monkeypatch):
+    """The model answered, it just answered badly (#103). Sampling is not deterministic, so one
+    retry recovers the impression instead of spending the study on the template."""
+    _clear(monkeypatch)
+    _configure(monkeypatch)
+    good = '{"impressionText": "No acute findings.", "recommendations": ["Routine follow-up."]}'
+    transport, seen = _responding_sequence(['{"impressionText": "broken", "recomm',  good])
+    _install(monkeypatch, transport)
+    out = await draft_impression(conclusion="", finding_labels="", critical_flags=[], ehr_context={})
+    assert out == LLMDraft(impression_text="No acute findings.", recommendations=["Routine follow-up."])
+    assert len(seen) == 2, "should have asked exactly twice"
+
+
+async def test_two_bad_replies_fall_back_to_the_template(monkeypatch, caplog):
+    _clear(monkeypatch)
+    _configure(monkeypatch)
+    transport, seen = _responding_sequence(["still not json"])
+    _install(monkeypatch, transport)
+    out = await draft_impression(conclusion="", finding_labels="", critical_flags=[], ehr_context={})
+    assert out is None
+    assert len(seen) == 2, "one retry, then give up"
+    assert "fell back to the deterministic template" in caplog.text
+
+
+async def test_transport_failure_is_not_retried(monkeypatch):
+    """A timeout already cost the full budget in front of a radiologist's read; do not pay twice."""
+    _clear(monkeypatch)
+    _configure(monkeypatch)
+    calls = {"n": 0}
+
+    def timing_out(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        raise httpx.TimeoutException("timed out", request=request)
+
+    _install(monkeypatch, httpx.MockTransport(timing_out))
+    out = await draft_impression(conclusion="", finding_labels="", critical_flags=[], ehr_context={})
+    assert out is None
+    assert calls["n"] == 1
