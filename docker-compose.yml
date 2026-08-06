@@ -45,11 +45,16 @@ services:
     # `docker compose build openmrs` and `up --build` with "build tag cannot contain a digest".
     # To bump: take the `o3-<short-sha>` tag the o3 pipeline just published and update this line.
     #
-    # o3-60f3ca86 is lh-radiology 60f3ca8, the merge of !91 (#100): the report body is mapped
-    # `type="text"`, so OpenMRS core stops rejecting bodies over 255 chars and a realistic
-    # dictated report can finally be signed through radiologyReport.form. Previous pin was
-    # o3-20260714, which carries the 255-char cap.
-    image: registry.gitlab.com/librehealth/radiology/lh-radiology/o3:o3-60f3ca86
+    # o3-7692ec4d is lh-radiology 7692ec4, carrying !92 and !93 together:
+    #   !92 (#100) declares `length="65535"` on the report body. The previous pin o3-60f3ca86 had
+    #   the same field mapped `type="text"` alone and was believed to fix this, but completing an
+    #   880-char report on that image still failed with "exceeds the maximum length of 255":
+    #   core reads Column.getLength(), which returns hibernate's default 255 whenever no length
+    #   is declared, whatever the SQL type is. Verified through the RIS form, not by reading the
+    #   mapping out of the omod, which is what missed it the first time.
+    #   !93 stops the reference demo-data generator, which added 50 demo patients and ~20 minutes
+    #   to every openmrs recreate (issue #101). Recreates on this pin are quick.
+    image: registry.gitlab.com/librehealth/radiology/lh-radiology/o3:o3-7692ec4d
     pull_policy: missing                  # `up` pulls the published image; build only on `compose build`
     build:
       context: ../lh-radiology            # sibling checkout of lh-radiology (o3 branch)
