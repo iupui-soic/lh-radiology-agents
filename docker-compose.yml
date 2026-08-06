@@ -45,7 +45,12 @@ services:
     # `docker compose build openmrs` and `up --build` with "build tag cannot contain a digest".
     # To bump: take the `o3-<short-sha>` tag the o3 pipeline just published and update this line.
     #
-    # o3-7692ec4d is lh-radiology 7692ec4, carrying !92 and !93 together:
+    # o3-010548c5 is lh-radiology 010548c, which adds !94 to the !92 + !93 pair below: it drops
+    # the patientflags module. Its dashboard-header extension refreshed its cache under whichever
+    # user opened a patient page first, and that refresh needs the admin-only "Manage Privileges",
+    # so radiologyReport.form answered 503 for radiologists after every restart. The demo-data
+    # generator used to hide this by warming the cache as the daemon user on every boot.
+    # The two fixes it builds on:
     #   !92 (#100) declares `length="65535"` on the report body. The previous pin o3-60f3ca86 had
     #   the same field mapped `type="text"` alone and was believed to fix this, but completing an
     #   880-char report on that image still failed with "exceeds the maximum length of 255":
@@ -54,7 +59,7 @@ services:
     #   mapping out of the omod, which is what missed it the first time.
     #   !93 stops the reference demo-data generator, which added 50 demo patients and ~20 minutes
     #   to every openmrs recreate (issue #101). Recreates on this pin are quick.
-    image: registry.gitlab.com/librehealth/radiology/lh-radiology/o3:o3-7692ec4d
+    image: registry.gitlab.com/librehealth/radiology/lh-radiology/o3:o3-010548c5
     pull_policy: missing                  # `up` pulls the published image; build only on `compose build`
     build:
       context: ../lh-radiology            # sibling checkout of lh-radiology (o3 branch)
