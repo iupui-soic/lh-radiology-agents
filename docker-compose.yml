@@ -413,6 +413,21 @@ services:
       # posture as the orchestrator's FHIR2_ALLOW_INSECURE_WRITE note; a real deployment uses an
       # https FHIR2_BASE_URL instead). READ, not WRITE: this service never writes.
       FHIR2_ALLOW_INSECURE_READ: "1"
+      # LLM-authored impressions (#77). Pass-throughs only, all defaulting to empty (= off), so
+      # an unset deployment keeps the deterministic template exactly as before. llm_draft.py
+      # needs BOTH base URL and model before it will attempt the LLM path at all. Without these
+      # lines the feature was unreachable in any deployment, whatever the operator set.
+      # The endpoint is OpenAI-compatible (`{base}/chat/completions`), so Gemini works via its
+      # OpenAI-compat base, as do vLLM, Ollama and the cloud providers. The key NEVER lives in
+      # this file; it comes from the operator environment, same posture as GEMINI_API_KEY on
+      # communications below.
+      IMPRESSION_LLM_BASE_URL: ${IMPRESSION_LLM_BASE_URL:-}
+      IMPRESSION_LLM_MODEL: ${IMPRESSION_LLM_MODEL:-}
+      IMPRESSION_LLM_API_KEY: ${IMPRESSION_LLM_API_KEY:-}
+      IMPRESSION_LLM_TIMEOUT_SECONDS: ${IMPRESSION_LLM_TIMEOUT_SECONDS:-}
+      # Plaintext http to an LLM host is refused unless opted in; https always passes. Only set
+      # this for a trusted in-network endpoint (a local Ollama or vLLM), never for a public one.
+      IMPRESSION_LLM_ALLOW_INSECURE: ${IMPRESSION_LLM_ALLOW_INSECURE:-}
   # report-verification reads the finalized report's conclusion from live fhir2 (#22) to parse
   # report.body (laterality, sections, BI-RADS, density) for the PI rules — same credentials as
   # impression-generation; without them every fetch 401s and the body rules silently stay inert.
