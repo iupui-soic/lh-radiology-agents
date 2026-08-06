@@ -141,7 +141,11 @@ services:
       ORCH_WEBHOOK_URL: http://orchestrator:8090/webhooks/orthanc
     volumes:
       - orthanc-db:/var/lib/orthanc/db
-      - ./docker/orthanc/orthanc.json:/etc/orthanc/lh-radiology.json:ro
+      # Mount target MUST be orthanc.json exactly (#94): the orthancteam image reads only that
+      # filename at boot and does NOT merge arbitrary /etc/orthanc/*.json. Under the old
+      # lh-radiology.json name the PythonScript setting was invisible, so the plugin loaded with
+      # no script and OnStableStudy never fired the webhook.
+      - ./docker/orthanc/orthanc.json:/etc/orthanc/orthanc.json:ro
       # The plugin file is mounted read-only; edits happen via git + `docker compose restart orthanc`.
       - ./integrations/orthanc-plugin/orthanc_stable_study.py:/etc/orthanc/orthanc_stable_study.py:ro
     restart: unless-stopped
@@ -546,6 +550,45 @@ services:
       # env without editing this file. Dev default stays admin.
       FHIR2_BASIC_USER: ${FHIR2_BASIC_USER:-admin}
       FHIR2_BASIC_PASS: ${FHIR2_BASIC_PASS:-Admin123}
+      # Both bridges need the AI authorship concept, for opposite reasons, so it is a
+      # passthrough on both and the orchestrator (line ~345) with one value behind it.
+      # This one reads it to AVOID flipping the AI's pre-sign draft to final when it
+      # projects a radiologist's signed report (#89). omrs_client.find_seeded_report has
+      # been running on its hardcoded default since !111 for want of this line.
+      FHIR2_PRESIGN_REPORT_CONCEPT: ${FHIR2_PRESIGN_REPORT_CONCEPT:-e3641471-3f25-57b4-ab27-a3ebc66e481e}
+    depends_on:
+      mariadb:
+        condition: service_started
+      openmrs:
+        condition: service_started
+    restart: unless-stopped
+
+  # The pre-sign direction (#94), the mirror of ris-sign-bridge above. The o3 module's Report
+  # form reads its Diagnosis field from its own radiology_report table, not from fhir2, so the
+  # AI pre-sign impression (#26) lands in fhir2 as a shadow write the radiologist never sees.
+  # This watcher polls fhir2 for AI-stamped preliminary DiagnosticReports and projects each
+  # conclusion into a DRAFT radiology_report row, so the field is populated on first open.
+  # Remove when the module reads fhir2 directly in the o3 sibling repo.
+  ris-presign-bridge:
+    # Same image as ris-sign-bridge: one Dockerfile and one build context serve both bridges,
+    # so CI publishes one image (#97) and the command picks the direction. Naming it here keeps
+    # the host's pull-based deploy (#98) able to reach this service.
+    image: registry.gitlab.com/librehealth/radiology/lh-radiology-agents/ris-sign-bridge:${APP_IMAGE_TAG:-main}
+    build: { context: scripts/mimic, dockerfile: Dockerfile }
+    command: python3 ris_presign_bridge.py
+    environment:
+      FHIR2_BASE_URL: http://openmrs:8080/openmrs/ws/fhir2/R4
+      # Passthrough, not literals (#93), same as the sign direction above.
+      FHIR2_BASIC_USER: ${FHIR2_BASIC_USER:-admin}
+      FHIR2_BASIC_PASS: ${FHIR2_BASIC_PASS:-Admin123}
+      # This bridge reads the concept to MATCH the AI's draft, the opposite direction from
+      # ris-sign-bridge above. Move the concept in a deployment and both follow.
+      FHIR2_PRESIGN_REPORT_CONCEPT: ${FHIR2_PRESIGN_REPORT_CONCEPT:-e3641471-3f25-57b4-ab27-a3ebc66e481e}
+      # Until #100 lands, OpenMRS core validates RadiologyReport.body against hibernate's
+      # default 255 chars, so a longer draft would populate the Diagnosis field and then block
+      # the radiologist from completing the report. The bridge clamps to fit, leaving room for
+      # the wrapper TinyMCE adds on save. Raise this to match once #100 ships.
+      RIS_REPORT_BODY_MAX: ${RIS_REPORT_BODY_MAX:-240}
     depends_on:
       mariadb:
         condition: service_started
