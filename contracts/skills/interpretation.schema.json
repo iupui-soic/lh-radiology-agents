@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:lhrad:skill:interpretation.runTools:output:1.0.0",
+  "$id": "urn:lhrad:skill:interpretation.runTools:output:1.1.0",
   "title": "interpretation.runTools output",
   "type": "object",
   "additionalProperties": false,
@@ -31,6 +31,8 @@
           "toolId": { "type": "string" },
           "label": { "type": "string" },
           "confidence": { "type": ["number", "null"] },
+          "rawScore": { "type": ["number", "null"], "description": "Raw model sigmoid for the head, recovered by inverting the weights' op-norm calibration (#86); null when no model ran or the weights carry no operating point." },
+          "opThreshold": { "type": ["number", "null"], "description": "The head's raw-sigmoid operating point (what op-norm maps to calibrated 0.5); with rawScore this gives surfaces a real margin instead of a score that reads as a coin flip. Null when unknown." },
           "evidenceRef": { "type": ["string", "null"] },
           "status": { "type": "string", "enum": ["STUBBED", "COMPLETE", "ERROR"] }
         }

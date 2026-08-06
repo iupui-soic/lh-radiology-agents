@@ -302,3 +302,80 @@ async def test_the_model_never_runs_on_a_non_chest_study(monkeypatch):
     }
     out = await handle("interpretation.runTools", {"studyContext": ctx})
     assert not any(f["toolId"] == "pneumothorax-detect" for f in out["findings"])
+
+
+# --- margin fields + configurable operating point (#86) -----------------------------------------
+# Calibrated positives crowd into 0.50-0.53 because the op-norm maps the head's tiny raw operating
+# point (~0.0098) to 0.5. The finding therefore carries the raw sigmoid and the op point so a
+# surface can show a margin, and the threshold is env-configurable per deployment.
+
+def test_raw_sigmoid_inverts_the_op_norm_exactly():
+    """Pin the inverse against the forward formula: c = r/(2t) below t, 1 - (1-r)/(2(1-t)) above.
+    Mutation: swap a sign or a branch and the round trip breaks."""
+    t = 0.0098
+    for r in (0.0, 0.0021, t, 0.02, 0.31, 0.97):
+        c = (r / (2 * t)) if r < t else 1.0 - ((1.0 - r) / (2 * (1.0 - t)))
+        assert handler._raw_sigmoid(c, t) == pytest.approx(r, abs=1e-12)
+    # the op point itself maps to exactly calibrated 0.5, both directions
+    assert handler._raw_sigmoid(0.5, t) == pytest.approx(t)
+    # no op-norm applied -> the calibrated score IS the raw sigmoid
+    assert handler._raw_sigmoid(0.51, None) == 0.51
+
+
+async def test_findings_carry_raw_score_and_op_threshold_on_both_outcomes(monkeypatch):
+    """#86 ask 1: the margin rides the payload, positive AND negative. A calibrated 0.51 with the
+    real op point is raw ~0.0298 -- three times the operating point, not a coin flip."""
+    _pixels_on(monkeypatch, pneumothorax_p=0.51)
+    monkeypatch.setattr(handler, "op_threshold", lambda name: 0.0098)
+    out = await handle("interpretation.runTools", {"studyContext": CXR_CONTEXT})
+    f = _ptx(out)
+    assert f["status"] == "COMPLETE"
+    assert f["opThreshold"] == 0.0098
+    assert f["rawScore"] == pytest.approx(1.0 - 2 * (1 - 0.0098) * (1 - 0.51))
+    assert "raw" in f["label"] and "op" in f["label"]  # the margin is readable, not just machine
+
+    _pixels_on(monkeypatch, pneumothorax_p=0.20)
+    monkeypatch.setattr(handler, "op_threshold", lambda name: 0.0098)
+    out = await handle("interpretation.runTools", {"studyContext": CXR_CONTEXT})
+    f = _ptx(out)
+    assert f["status"] == "STUBBED"
+    assert f["confidence"] is None                      # the #71 negative posture is untouched
+    assert f["rawScore"] == pytest.approx(2 * 0.0098 * 0.20)
+    assert f["opThreshold"] == 0.0098
+
+
+async def test_margin_fields_degrade_to_null_when_the_op_point_is_unknown(monkeypatch):
+    """No op point (no-torch lane, or weights without one) -> nulls and the old label, never a
+    fabricated number. rawScore falls back to the calibrated score itself."""
+    _pixels_on(monkeypatch, pneumothorax_p=0.87)
+    monkeypatch.setattr(handler, "op_threshold", None)
+    out = await handle("interpretation.runTools", {"studyContext": CXR_CONTEXT})
+    f = _ptx(out)
+    assert f["status"] == "COMPLETE"
+    assert f["opThreshold"] is None
+    assert f["rawScore"] == 0.87
+    assert "raw" not in f["label"]
+
+
+async def test_positive_threshold_is_env_configurable(monkeypatch):
+    """#86 ask 2: a deployment can tighten the operating point without a release. p=0.51 clears the
+    0.5 default but must NOT clear a 0.55 override."""
+    _pixels_on(monkeypatch, pneumothorax_p=0.51)
+    monkeypatch.setattr(handler, "POSITIVE_THRESHOLD", 0.55)
+    out = await handle("interpretation.runTools", {"studyContext": CXR_CONTEXT})
+    assert _ptx(out)["status"] == "STUBBED"
+
+
+def test_threshold_env_read_survives_the_empty_compose_passthrough(monkeypatch):
+    """The compose pass-through hands an EMPTY string when the var is unset; a bare float() of it
+    would keep the whole agent from booting. Exercise the REAL module-level read by reloading:
+    empty -> the 0.5 default, a value -> that value. The final reload restores the default for the
+    rest of the suite (monkeypatch undoes the env)."""
+    import importlib
+
+    monkeypatch.setenv("CXR_POSITIVE_THRESHOLD", "")
+    assert importlib.reload(handler).POSITIVE_THRESHOLD == 0.5   # would raise before the fix
+    monkeypatch.setenv("CXR_POSITIVE_THRESHOLD", "0.62")
+    assert importlib.reload(handler).POSITIVE_THRESHOLD == 0.62
+    monkeypatch.delenv("CXR_POSITIVE_THRESHOLD")
+    assert importlib.reload(handler).POSITIVE_THRESHOLD == 0.5

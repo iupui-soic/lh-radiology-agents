@@ -49,11 +49,10 @@ MODEL_WEIGHTS = "densenet121-res224-all"
 # as a KeyError the handler turns into an honest ERROR finding rather than a silent miss.
 TARGET_PATHOLOGY = "Pneumothorax"
 
-# A pathology is REPORTED positive when its sigmoid output clears this. 0.5 is the model's own
-# nominal operating point; it is not tuned to a population and is deliberately a named constant
-# rather than a magic number, because tuning it is a clinical decision that needs data we do not
-# have (the same argument as #64's registry corpus). One global threshold, no per-pathology tuning.
-POSITIVE_THRESHOLD = 0.5
+# The positive/negative decision itself lives in handler.POSITIVE_THRESHOLD (env-configurable,
+# #86); this module only reports scores. What it CAN answer, because it owns the model, is where
+# the head's operating point sits (op_threshold below) -- the number the op-norm calibration maps
+# to 0.5, and the reason every calibrated positive on a screening cohort crowds into 0.50-0.53.
 
 # Pathologies the model exposes but which are not screening-actionable on a plain film, or which
 # duplicate another head. Excluded from the probability dict score() returns, so no future consumer
@@ -80,6 +79,37 @@ def _load():
                 _model = m
                 log.info("pneumothorax-detect: loaded %s (%d heads)", MODEL_WEIGHTS, len(m.pathologies))
     return _model
+
+
+def op_threshold(pathology: str) -> float | None:
+    """The head's raw-sigmoid operating point, or None when the loaded weights carry none.
+
+    The `-all` weights ship per-head operating thresholds and the forward pass op-norms outputs so
+    that each head's threshold lands exactly at 0.5. For Pneumothorax that threshold is a raw
+    sigmoid of ~0.0098, which is why calibrated positives compress into a razor-thin band above
+    0.5 (#86): almost the entire raw axis above the op point maps into [0.5, 1) near its floor.
+    Exposing the op point (and, in the handler, the raw sigmoid recovered from it) is what lets a
+    downstream surface show a margin instead of a number that reads as a coin flip.
+
+    NaN means "this head has no operating point in these weights" and is reported as None.
+
+    Deliberately answers only from the ALREADY-loaded model (never _load()): on the pixel path
+    score() has always run first, so the weights are in memory; anywhere else -- a handler test
+    that fakes score() on a machine that happens to have torch -- this must not become the call
+    that pulls a DenseNet off disk (or worse, the network) as a side effect. No model yet -> None.
+    """
+    model = _model
+    if model is None:
+        return None
+    op_threshs = getattr(model, "op_threshs", None)
+    if op_threshs is None:
+        return None
+    try:
+        idx = list(model.pathologies).index(pathology)
+    except ValueError:
+        return None
+    value = float(op_threshs[idx])
+    return None if value != value else value  # NaN-safe without importing math for one check
 
 
 def score(greyscale) -> dict[str, float]:

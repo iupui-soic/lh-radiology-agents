@@ -407,6 +407,10 @@ services:
     ports: ["8103:8103"]
     environment:
       <<: *otel-env
+      # CAD positive threshold, CALIBRATED domain (#86). Pass-through defaulting to empty (= the
+      # in-code 0.5, the model's own operating point), so an unset deployment changes nothing.
+      # Tightening it is a per-deployment clinical call, made with cohort prevalence in hand.
+      CXR_POSITIVE_THRESHOLD: ${CXR_POSITIVE_THRESHOLD:-}
   # impression-generation reads report conclusions from live fhir2 (#16), so it needs the same
   # credentials as the orchestrator (#53) — without them every fetch 401s and silently degrades
   # to "no critical detection".

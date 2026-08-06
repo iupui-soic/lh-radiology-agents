@@ -40,11 +40,15 @@ with `evidenceRef`, `overallStatus` STUBBED|COMPLETE|PARTIAL|ERROR). A `findings
 (`cxr-densenet121-res224-all`) whenever the model scored an instance (even a STUBBED negative),
 `referral-rule-1` for a reason-code hit, `stub-0` otherwise.
 
-## Threshold policy (#71)
-A single global `POSITIVE_THRESHOLD = 0.5` (`cxr_model.py`) — the model's nominal operating point,
-deliberately **un-tuned**. There is no per-pathology threshold. Tuning it is a clinical decision
-that needs a real cohort we don't have (same argument as #64's registry corpus); a named constant,
-not a magic number.
+## Threshold policy (#71, revisited by #86)
+A single global `POSITIVE_THRESHOLD` (`handler.py`) — default 0.5, the model's nominal operating
+point, overridable per deployment via `CXR_POSITIVE_THRESHOLD` (calibrated domain; empty = default).
+The **default stays deliberately un-tuned in code**: tuning it is a clinical decision that needs a
+real cohort (same argument as #64's registry corpus), so #86 made it *deployable* without making the
+call. There is no per-pathology threshold. Findings additionally carry `rawScore` (op-norm-inverted
+raw sigmoid) and `opThreshold` (the head's raw operating point, `cxr_model.op_threshold`) so
+surfaces can show a margin — the calibrated score compresses every positive into ~0.50–0.53 and
+reads as a coin flip on its own (#86).
 
 ## "Draft only on positives" — the #71 decision (read before changing negative behaviour)
 #71 asked whether a negative screen should emit `COMPLETE` (a pre-sign draft on **every** study) or

@@ -50,3 +50,12 @@ def test_model_is_loaded_once_and_cached():
     first = cxr_model._model
     score(_synthetic_frame())
     assert cxr_model._model is first, "the DenseNet must be built once and reused"
+
+
+def test_op_threshold_reports_the_heads_operating_point_after_a_score():
+    """#86: the head's raw operating point backs the margin fields. Scored first so the weights are
+    in memory -- op_threshold deliberately never loads them itself (see its docstring)."""
+    score(_synthetic_frame())
+    t = cxr_model.op_threshold(TARGET_PATHOLOGY)
+    assert t is not None and 0.0 < t < 0.1, "the -all weights put Pneumothorax's op point near 0.0098"
+    assert cxr_model.op_threshold("NotARealHead") is None
