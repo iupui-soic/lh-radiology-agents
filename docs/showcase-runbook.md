@@ -144,11 +144,16 @@ the drift class behind #83 cannot recur. Only in an announced window, never mid-
    git pull                                   # compose + configs only; images come from CI
    docker compose -f docker-compose.yml -f docker-compose.tls.yml pull \
      orchestrator worklist-triage ehr-assistant interpretation-assistant \
-     impression-generation report-verification communications worklist-api ohif ris-sign-bridge
+     impression-generation report-verification communications worklist-api ohif \
+     ris-sign-bridge ris-presign-bridge
    docker compose -f docker-compose.yml -f docker-compose.tls.yml up -d --no-deps \
      orchestrator worklist-triage ehr-assistant interpretation-assistant \
-     impression-generation report-verification communications worklist-api ohif ris-sign-bridge
+     impression-generation report-verification communications worklist-api ohif \
+     ris-sign-bridge ris-presign-bridge
    ```
+   Both bridges are named because both are app services on the pull path; they share one
+   published image (`ris-sign-bridge`) and differ only in the command, so a deploy that
+   lists one and forgets the other leaves half the RIS bridge on an old build.
    `--no-deps` is load-bearing: the stateful set (openmrs, mariadb, orthanc and its volume,
    temporal's postgres, the comms ledger) is never touched by a deploy.
 3. Pin what reviewers see: `APP_IMAGE_TAG=vX.Y.Z` (or a short SHA for an urgent fix) in the
