@@ -429,3 +429,29 @@ async def test_json_fence_wrapped_response_is_accepted(monkeypatch):
                                  critical_flags=CRITICAL_FLAGS, ehr_context={})
     assert isinstance(out, LLMDraft)
     assert out.impression_text == "Large pneumothorax on the right."
+
+
+async def test_prompt_demands_an_action_when_a_critical_flag_is_present(monkeypatch):
+    """The parser refuses an empty recommendation list beside a critical flag, so the prompt has
+    to ask for one; otherwise the LLM path fails exactly where it is most valuable (#103)."""
+    _clear(monkeypatch)
+    _configure(monkeypatch)
+    content = '{"impressionText": "Pneumothorax is present.", "recommendations": ["Chest tube."]}'
+    transport, seen = _responding(200, content=content)
+    _install(monkeypatch, transport)
+    await draft_impression(
+        conclusion="", finding_labels="pneumothorax", critical_flags=CRITICAL_FLAGS, ehr_context={},
+    )
+    sent = seen[0]["body"]["messages"][1]["content"]
+    assert "at least one concrete action" in sent
+
+
+async def test_prompt_stays_quiet_about_actions_on_a_normal_study(monkeypatch):
+    _clear(monkeypatch)
+    _configure(monkeypatch)
+    content = '{"impressionText": "No acute findings.", "recommendations": []}'
+    transport, seen = _responding(200, content=content)
+    _install(monkeypatch, transport)
+    await draft_impression(conclusion="", finding_labels="", critical_flags=[], ehr_context={})
+    sent = seen[0]["body"]["messages"][1]["content"]
+    assert "at least one concrete action" not in sent

@@ -153,7 +153,16 @@ _SYSTEM_PROMPT = (
     # Said explicitly because the omission cost us the whole feature (#103): a normal study
     # warrants no recommendation, the model correctly returned [], and the parser threw the draft
     # away as malformed. Most of a screening cohort is normal, so most drafts were discarded.
-    "recommendations may be an empty array when none are warranted; do not invent one."
+    "recommendations may be an empty array when none are warranted; do not invent one. "
+    # The mirror of that, learned in the same session: told only that empty was acceptable, the
+    # model returned [] next to a confirmed pneumothorax, which the parser refuses (prose naming a
+    # critical finding and advising nothing reads as reassurance) -- so the LLM path failed exactly
+    # where it is most valuable. Ask for the action wherever one is load-bearing.
+    "When confirmed critical findings are listed, at least one recommendation is REQUIRED. "
+    # And the JSON itself has to survive json.loads: raw newlines and unescaped quotes inside the
+    # string values were the other live failure ("Expecting ',' delimiter").
+    "Both fields must be valid JSON strings: escape any double quote, and use no literal newlines "
+    "inside a string."
 )
 
 
@@ -166,6 +175,13 @@ def _build_prompt(*, conclusion: str, labels_text: str, critical_flags: list[dic
     ]
     if ehr_summary:
         lines.append(ehr_summary)
+    if critical_flags:
+        # Repeated per-request, not left to the system prompt alone: this is the case the parser
+        # refuses outright, so it is worth spending a line on it where the findings are named.
+        lines.append(
+            "This study has confirmed critical findings, so recommendations must contain at "
+            "least one concrete action."
+        )
     return "\n".join(lines)
 
 
