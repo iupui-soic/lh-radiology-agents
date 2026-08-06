@@ -17,6 +17,9 @@ Layout under <share-root>/<cohort-name>/:
   manifest.json          the cohort manifest (the recipe)
   dicom/files/pXX/...     the fetched, fixed-up DICOMs (same layout fetch.py writes)
   inputs/                 optional: curation-input CSVs, so a dev can re-curate without PhysioNet
+  openmrs-seed.sql.gz     optional: a loaded OpenMRS DB, so a dev restores in minutes instead of
+                          booting clean and running the ETL (build it with a clean boot + load_cohort,
+                          verify with cohort_audit.py, dump with scripts/dump_openmrs_seed.sh)
   SHA256SUMS             integrity manifest over every shared file
   SHARE.json            provenance: cohort name, counts, tool version, source notes
   README.txt            the DUA boundary, in the share itself
@@ -137,6 +140,11 @@ def publish(args, p) -> int:
         _sync_tree(args.dicom_root, os.path.join(target, "dicom"), cloud=args.cloud)
     if args.inputs_root and os.path.isdir(args.inputs_root):
         _sync_tree(args.inputs_root, os.path.join(target, "inputs"), cloud=args.cloud)
+    # The seed is the recipe's OUTPUT, shared beside the recipe rather than instead of it: a clean
+    # boot plus the ETL is ~23 minutes, restoring this is ~1. It carries MIMIC narratives, so it is
+    # credentialed data like everything else here and never goes in the repo.
+    if args.seed and os.path.isfile(args.seed):
+        shutil.copy2(args.seed, os.path.join(target, "openmrs-seed.sql.gz"))
 
     provenance = {
         "name": args.name,
@@ -145,6 +153,7 @@ def publish(args, p) -> int:
         "with_meds": sum(1 for s in studies if s.get("meds")),
         "dicom_included": bool(args.dicom_root and os.path.isdir(args.dicom_root)),
         "inputs_included": bool(args.inputs_root and os.path.isdir(args.inputs_root)),
+        "openmrs_seed_included": bool(args.seed and os.path.isfile(args.seed)),
         "source": "PhysioNet MIMIC-CXR v2.1.0 + MIMIC-IV v3.1 (curated by scripts/mimic/#68)",
     }
     with open(os.path.join(target, "SHARE.json"), "w", encoding="utf-8") as f:
@@ -156,7 +165,8 @@ def publish(args, p) -> int:
     print(f"published '{args.name}' to {target}")
     print(f"  studies: {len(studies)} | files checksummed: {count}")
     print(f"  dicom: {'yes' if provenance['dicom_included'] else 'no'} | "
-          f"inputs: {'yes' if provenance['inputs_included'] else 'no'}")
+          f"inputs: {'yes' if provenance['inputs_included'] else 'no'} | "
+          f"openmrs seed: {'yes' if provenance['openmrs_seed_included'] else 'no'}")
     if args.cloud:
         print("  cloud mode: wait for the sync client to finish UPLOADING before anyone pulls.")
     print("\n" + DUA_NOTICE)
@@ -189,6 +199,16 @@ def pull(args, p) -> int:
     if os.path.exists(manifest):
         n = len(json.load(open(manifest)).get("studies", []))
         print(f"  manifest: {n} studies -> load with scripts/mimic/load_cohort.py")
+    seed = os.path.join(local, "openmrs-seed.sql.gz")
+    if os.path.exists(seed):
+        # Say it plainly, because the fast path is the whole reason the seed is in the share: a
+        # clean boot plus the ETL took ~23 minutes when this was built, a restore takes about one.
+        print(f"  openmrs seed: {seed}")
+        print("    restore instead of booting clean + loading:")
+        print("      docker compose down && docker volume rm <project>_mariadb-data")
+        print("      cp <seed> docker/openmrs/seed/openmrs-seed.sql.gz")
+        print("      docker compose -f docker-compose.yml -f docker-compose.seed.yml up -d")
+        print("    then verify: scripts/mimic/cohort_audit.py --manifest manifest.json")
     return 0
 
 
@@ -200,6 +220,9 @@ def main(argv=None) -> int:
     pub.add_argument("--manifest", required=True)
     pub.add_argument("--dicom-root", default="", help="fetched DICOM tree (fetch.py dest)")
     pub.add_argument("--inputs-root", default="", help="optional: curation-input CSVs")
+    pub.add_argument("--seed", default="",
+                     help="optional: a dumped OpenMRS DB (openmrs-seed.sql.gz) with the cohort "
+                          "already loaded, for restore-in-minutes instead of a clean boot + ETL")
     pub.add_argument("--share-root", default=os.environ.get("MIMIC_SHARE_ROOT", ""))
     pub.add_argument("--name", default="v1", help="cohort version name under the share root")
     pub.add_argument("--cloud", action="store_true",

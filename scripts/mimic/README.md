@@ -97,6 +97,33 @@ python load_cohort.py ~/mimic-secure/cohort/v1/manifest.json --concept $MIMIC_OR
 # DICOMs are under ~/mimic-secure/cohort/v1/dicom/files/... -> dicom_fixup + push to Orthanc
 ```
 
+### Faster: restore the loaded DB instead of loading it
+
+The share can carry `openmrs-seed.sql.gz`, an OpenMRS database with the cohort already loaded.
+Measured when it was built: a clean boot plus `load_cohort` is ~23 minutes (the boot is nearly all
+of it); restoring the seed is about one. Use it for a new test server or a throwaway stack; use the
+manifest path when you need to change what gets loaded.
+
+```bash
+docker compose down && docker volume rm <project>_mariadb-data      # the seed loads into an EMPTY volume
+cp ~/mimic-secure/cohort/v1/openmrs-seed.sql.gz docker/openmrs/seed/openmrs-seed.sql.gz
+docker compose -f docker-compose.yml -f docker-compose.seed.yml up -d
+python cohort_audit.py --manifest ~/mimic-secure/cohort/v1/manifest.json   # 82 OK / 18 TRUNCATED
+```
+
+The audit is not optional ceremony: it is how we found, on the demo host, 10 studies whose
+narrative had been replaced by rehearsal text and 3 that had lost their IMPRESSION section. The 18
+TRUNCATED are expected -- those narratives exceed fhir2's 1024-char `conclusion` cap and the ETL
+clamps them (#105).
+
+Building a fresh seed (curator): clean boot with NO seed overlay, `bootstrap_radiology_concept.py`,
+`load_cohort.py`, `cohort_audit.py` to verify, then `scripts/dump_openmrs_seed.sh <out>`. Since #101
+a clean boot generates no reference demo patients, so the dump holds the cohort and nothing else --
+the one built on 2026-08-07 was 3.0 MB against 6.6 MB for a drifted host DB.
+
+```bash
+```
+
 `pull` uses rsync (resumable) and verifies every file against the published `SHA256SUMS`. **DUA:**
 the shared root must be readable ONLY by team members individually credentialed for BOTH MIMIC-CXR
 and MIMIC-IV; the store's ACLs enforce that, the tool cannot. Nothing MIMIC ever lands in the repo.
