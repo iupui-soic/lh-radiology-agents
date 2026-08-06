@@ -149,7 +149,11 @@ _SYSTEM_PROMPT = (
     "supporting context. Write natural clinical prose that is consistent with, and does not "
     "contradict or invent findings beyond, the confirmed critical findings and the conclusion "
     "text given. Respond with ONLY a JSON object of the shape "
-    '{"impressionText": "...", "recommendations": ["...", "..."]} -- no markdown, no commentary.'
+    '{"impressionText": "...", "recommendations": ["...", "..."]} -- no markdown, no commentary. '
+    # Said explicitly because the omission cost us the whole feature (#103): a normal study
+    # warrants no recommendation, the model correctly returned [], and the parser threw the draft
+    # away as malformed. Most of a screening cohort is normal, so most drafts were discarded.
+    "recommendations may be an empty array when none are warranted; do not invent one."
 )
 
 
@@ -185,25 +189,59 @@ async def _chat_completion(base_url: str, model: str, api_key: str, timeout: flo
         return resp.json()["choices"][0]["message"]["content"]
 
 
+def _first_json_object(text: str) -> str:
+    """The first balanced {...} run in `text`, or `text` unchanged when there is none.
+
+    Backends decorate the object despite `response_format` (#103): a ```json fence, a leading
+    "Here is the impression:", a trailing sentence after the closing brace. `json.loads` on the
+    whole string then dies with "Extra data" and a perfectly good draft is discarded. Scanning to
+    the matching brace keeps the object and ignores the decoration. String-aware, so a brace
+    inside the prose (a measurement, a quoted snippet) cannot unbalance the scan.
+    """
+    start = text.find("{")
+    if start < 0:
+        return text
+    depth = 0
+    in_string = False
+    escaped = False
+    for i, ch in enumerate(text[start:], start):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+    return text
+
+
 def _parse_draft(content: str, critical_flags: list[dict]) -> LLMDraft:
-    """Raises on anything unusable; draft_impression() turns every raise into a None. Strips a
-    ```json fence defensively -- response_format support varies across OpenAI-compatible
-    backends, and some wrap JSON in a code fence regardless of the hint."""
-    text = content.strip()
-    if text.startswith("```"):
-        text = text.strip("`")
-        if text.startswith("json"):
-            text = text[len("json"):]
-        text = text.strip()
-    parsed = json.loads(text)
+    """Raises on anything unusable; draft_impression() turns every raise into a None."""
+    parsed = json.loads(_first_json_object(content.strip()))
     impression_text = parsed["impressionText"]
     recommendations = parsed["recommendations"]
     if not isinstance(impression_text, str) or not impression_text.strip():
         raise ValueError("empty impressionText")
-    if not isinstance(recommendations, list) or not recommendations or not all(
+    if not isinstance(recommendations, list) or not all(
         isinstance(r, str) and r.strip() for r in recommendations
     ):
-        raise ValueError("malformed or empty recommendations")
+        raise ValueError("malformed recommendations")
+    # An EMPTY list is legitimate and must stay that way (#103). A normal study warrants no
+    # recommendation, the model says so by returning [], and requiring one here threw away the
+    # draft for most of a screening cohort -- silently, since the fallback is by design. Where a
+    # recommendation IS load-bearing, next to a confirmed critical flag, an empty list is still
+    # refused: prose that names a critical finding and then advises nothing reads as reassurance.
+    if critical_flags and not recommendations:
+        raise ValueError("no recommendations alongside a confirmed critical flag")
     # Criticality is never the LLM's call (#78 owns that derivation) -- so the prose must ASSERT
     # every confirmed critical flag, checked with the SAME negation-aware, word-boundary matcher
     # as the #78 scanners. Two failure shapes a bare substring test waves through, both rejected
@@ -227,6 +265,26 @@ def _parse_draft(content: str, critical_flags: list[dict]) -> LLMDraft:
     )
 
 
+_ATTEMPTS = 0
+_FALLBACKS = 0
+
+
+def _note_fallback() -> None:
+    """Count how often the LLM draft is discarded, and say so (#103).
+
+    The fallback is safe by design, which is exactly why it needs a number: the feature can be
+    configured, reach the model, and still be inert on nearly every study with nothing in the
+    deployment looking wrong. #103 was 11 of 12 studies before anyone noticed. Counts only, no
+    model output and no report text.
+    """
+    global _FALLBACKS
+    _FALLBACKS += 1
+    _log.warning(
+        "impression LLM draft fell back to the deterministic template (%d of %d attempts since start)",
+        _FALLBACKS, _ATTEMPTS,
+    )
+
+
 async def draft_impression(
     *, conclusion: str, finding_labels: str | list[str], critical_flags: list[dict], ehr_context: dict,
 ) -> LLMDraft | None:
@@ -237,6 +295,8 @@ async def draft_impression(
     if config is None:
         return None
     base_url, model, api_key, timeout = config
+    global _ATTEMPTS
+    _ATTEMPTS += 1
 
     # EVERYTHING from here sits under the never-raise ladder, the transport guard and prompt
     # build included: urlparse raises ValueError on a malformed base URL (e.g. a junk port), and
@@ -255,6 +315,7 @@ async def draft_impression(
                 "IMPRESSION_LLM_ALLOW_INSECURE=1 for a trusted internal network",
                 urlparse(base_url).hostname,
             )
+            _note_fallback()
             return None
         if _is_plaintext_remote(base_url):
             # Proceeding only because of the insecure opt-in; leave an audit trail of what rides
@@ -287,4 +348,5 @@ async def draft_impression(
         _log.warning("impression LLM draft malformed: %s: %s", e.__class__.__name__, e)
     except Exception as e:  # noqa: BLE001 - never-raises backstop; this path is advisory only
         _log.warning("impression LLM draft unexpected failure: %s", e.__class__.__name__)
+    _note_fallback()
     return None
