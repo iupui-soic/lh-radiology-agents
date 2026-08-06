@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from typing import Optional
 
 from radagent_common.tracing import now_iso
@@ -57,7 +58,7 @@ try:
     from radagent_common.imaging import NotAnImage, dicom_to_greyscale
     from radagent_common.orthanc_client import OrthancClient
 
-    from cxr_model import POSITIVE_THRESHOLD, TARGET_PATHOLOGY, score
+    from cxr_model import TARGET_PATHOLOGY, op_threshold, score
 
     PIXEL_TOOLING = True
 except ImportError as _exc:  # pragma: no cover - only reachable in a lane without the extras installed
@@ -67,9 +68,21 @@ except ImportError as _exc:  # pragma: no cover - only reachable in a lane witho
     class NotAnImage(Exception):  # type: ignore[no-redef]
         """Placeholder so the except-clause below is always a valid type."""
 
-    OrthancClient = dicom_to_greyscale = score = None  # type: ignore[assignment]
-    POSITIVE_THRESHOLD = 0.5
+    OrthancClient = dicom_to_greyscale = score = op_threshold = None  # type: ignore[assignment]
     TARGET_PATHOLOGY = "Pneumothorax"
+
+# A pathology is REPORTED positive when its CALIBRATED score clears this. Lives here (not in
+# cxr_model) because the decision is the handler's and the env read must work in the no-torch lane.
+# 0.5 is the model's own nominal operating point -- with the op-norm calibration the `-all` weights
+# apply, calibrated 0.5 IS the head's op threshold, so the default changes nothing. It is
+# deliberately un-tuned in code: #86 measured 47/100 positives on the showcase cohort at the
+# default, so a deployment MAY tighten it (calibrated domain, e.g. "0.55") once someone owns that
+# call with cohort prevalence in hand -- making it deployable-without-a-release is exactly #86's
+# ask, but shipping a different default is a clinical decision this module refuses to make (the
+# same argument as #64's registry corpus).
+# `or` (not a get default): the compose pass-through hands an EMPTY string when unset, and
+# float("") at import time would keep the whole agent from booting.
+POSITIVE_THRESHOLD = float(os.environ.get("CXR_POSITIVE_THRESHOLD") or "0.5")
 
 # Referral-reason ICD-10 codes per real-slice tool, matched by FAMILY PREFIX rather than exact
 # code. worklist-triage normalises the same order.reasonCode field to a 3-char ICD-10 category
@@ -199,6 +212,25 @@ async def _frontal_first(client, instances: list[str]) -> list[str]:
     return [instance_id for _, _, instance_id in ranked]
 
 
+def _raw_sigmoid(calibrated: float, op_thresh: Optional[float]) -> float:
+    """Invert TorchXRayVision's op-norm to recover the raw sigmoid from a calibrated score (#86).
+
+    The forward op-norm maps a raw sigmoid r with per-head operating threshold t piecewise-linearly
+    so that t lands exactly at 0.5:  c = r/(2t) for r < t, else c = 1 - (1-r)/(2(1-t)).  Both
+    branches are linear and meet at (t, 0.5), so the inverse is exact:
+    r = 2tc for c < 0.5, else 1 - 2(1-t)(1-c).  Pure math, no torch -- which keeps it testable in
+    the no-torch lane and usable on scores that were computed elsewhere.
+
+    op_thresh None means the weights applied no op-norm, so the "calibrated" score IS the raw
+    sigmoid and passes through unchanged.
+    """
+    if op_thresh is None:
+        return calibrated
+    if calibrated < 0.5:
+        return 2.0 * op_thresh * calibrated
+    return 1.0 - 2.0 * (1.0 - op_thresh) * (1.0 - calibrated)
+
+
 def _pneumothorax_finding(tool_id: str, probs: dict, instance_id: str) -> dict:
     """Turn the model's Pneumothorax probability into the contract's finding.
 
@@ -222,11 +254,26 @@ def _pneumothorax_finding(tool_id: str, probs: dict, instance_id: str) -> dict:
         critical flag -- and stays correct once the scan becomes negation-aware (#78).
     """
     p = probs[TARGET_PATHOLOGY]  # KeyError if the model lacks the head -> caller turns it into ERROR
+    # The margin fields (#86): the head's raw-sigmoid operating point and the raw sigmoid recovered
+    # from the calibrated score. Carried on BOTH outcomes -- a negative's distance below the op
+    # point is as informative as a positive's above it. op_threshold is None when the extras are
+    # absent (this function is then only reachable through a test's fake) or the weights carry no
+    # op point for the head; the payload degrades to null rather than a fabricated number.
+    op_t = op_threshold(TARGET_PATHOLOGY) if op_threshold is not None else None
+    raw = _raw_sigmoid(p, op_t)
+    # In the label, the raw sigmoid against its op point -- "raw 0.021 vs op 0.0098" -- because the
+    # calibrated "p=0.51" alone reads as a coin flip on every surface that shows it (#86).
+    margin_text = f", raw {raw:.3g} vs op {op_t:.3g}" if op_t is not None else ""
     if p >= POSITIVE_THRESHOLD:
         return {
             "toolId": tool_id,
-            "label": f"Pneumothorax (screening p={p:.2f}); screening signal only, not a read",
+            "label": (
+                f"Pneumothorax (screening p={p:.2f}{margin_text}); "
+                "screening signal only, not a read"
+            ),
             "confidence": p,
+            "rawScore": raw,
+            "opThreshold": op_t,
             # Text locator: the instance the model actually scored, so a reader can pull up the exact
             # frame. Not a DICOM SC/overlay ref -- writing AI-made images into the record is deferred
             # (#59) and needs its own safety review.
@@ -236,10 +283,12 @@ def _pneumothorax_finding(tool_id: str, probs: dict, instance_id: str) -> dict:
     return {
         "toolId": tool_id,
         "label": (
-            f"Pneumothorax screening negative (p={p:.2f} < {POSITIVE_THRESHOLD:g}); "
+            f"Pneumothorax screening negative (p={p:.2f} < {POSITIVE_THRESHOLD:g}{margin_text}); "
             "model ran, no finding at threshold -- screening signal only, not a read"
         ),
         "confidence": None,
+        "rawScore": raw,
+        "opThreshold": op_t,
         "evidenceRef": f"orthanc:instance/{instance_id}",
         "status": "STUBBED",
     }
@@ -447,7 +496,8 @@ async def handle(skill_id: str, payload: dict) -> dict:
     ]
 
     return {
-        "schemaVersion": "1.0.0",
+        # 1.1.0: findings gained the optional rawScore/opThreshold margin fields (#86).
+        "schemaVersion": "1.1.0",
         "workflowId": ctx["workflowId"],
         "toolsSelected": tools_selected,
         "findings": findings,
