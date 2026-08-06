@@ -12,7 +12,10 @@ table for COMPLETED reports, and for each one project the authored diagnosis int
 seeded DiagnosticReport (conclusion = RIS text, status = final) -- the same flip the
 report_seeder rehearsal cue performs, so the poller and everything post-sign behave
 identically to a working module emit. Idempotent: a report whose DiagnosticReport is already
-final is skipped. Runs as the `ris-sign-bridge` compose service.
+final WITH OUR OWN CONCLUSION is skipped; an already-final report with a DIFFERENT conclusion
+is a stale seeded final (a rehearsal `finalize` that predates the read, #102) and is refused
+loudly, or projected over when BRIDGE_OVERWRITE_STALE_FINAL is set. Runs as the
+`ris-sign-bridge` compose service.
 """
 import os
 import time
@@ -35,6 +38,17 @@ TRUNCATION_MARKER = "[TRUNCATED BY ris-sign-bridge: fhir2 caps conclusion at 102
 # is the highest-consequence state this bridge has, and a single line that scrolled away hours
 # ago is functionally silence -- while every-cycle logging is one line per 10s per stuck report.
 MISS_LOG_EVERY = 30
+
+# What to do with a COMPLETED report whose seeded DiagnosticReport is already final with a
+# DIFFERENT conclusion (#102): that final is not our work, it is a leftover rehearsal
+# `finalize` (run-book §6) from before the radiologist read the study. "Never overwrite a
+# final report" stays the default, so the bridge refuses -- but now loudly and retrying, so a
+# `report_seeder.py restage` (which returns the seed to preliminary) lets the sign bridge on
+# the next cycle without a container restart. Set to 1/true to project the human sign over the
+# stale final instead: the signed read is newer than any seed by construction, but overwriting
+# a final chart record is a deliberate per-deployment call, not a silent default.
+OVERWRITE_STALE_FINAL = (
+    os.environ.get("BRIDGE_OVERWRITE_STALE_FINAL", "").strip().lower() in ("1", "true", "yes"))
 
 
 def _note_miss(missing: dict[int, int], report_id: int, what: str) -> None:
@@ -74,11 +88,12 @@ def connect():
 
 def bridge_cycle(conn, c, bridged: set[int], missing: dict[int, int]) -> None:
     """One pass over COMPLETED RIS reports. `bridged` holds report_ids DONE (flipped, or found
-    already final); `missing` counts consecutive resolve misses per report_id, so the miss is
-    RETRIED every cycle and logged on the first and every MISS_LOG_EVERY-th attempt -- a
-    resolve miss is routinely transient (ETL still loading, fhir2 hiccup, order arriving late),
-    and the old permanent skip turned any hiccup into a silently lost human sign until a
-    container restart (#90)."""
+    already final with our own conclusion); `missing` counts consecutive resolve misses AND
+    stale-final refusals per report_id, so each is RETRIED every cycle and logged on the first
+    and every MISS_LOG_EVERY-th attempt -- a resolve miss is routinely transient (ETL still
+    loading, fhir2 hiccup, order arriving late), a stale final clears on an operator restage,
+    and a permanent skip turns either into a silently lost human sign until a container
+    restart (#90, #102)."""
     for report_id, body, accession, given, family, provider_uuid in completed_reports(conn):
         if report_id in bridged:
             continue
@@ -90,20 +105,44 @@ def bridge_cycle(conn, c, bridged: set[int], missing: dict[int, int]) -> None:
         if not fhir_id:
             _note_miss(missing, report_id, f"no seeded fhir report for {accession}")
             continue
-        missing.pop(report_id, None)
         r = c._fget(f"DiagnosticReport/{fhir_id}")
-        if r.get("status") == "final":
-            bridged.add(report_id)
-            continue
         signer = f"{given or ''} {family or ''}".strip()
         body_text = strip_html(body)
         conclusion, was_truncated = clamp_conclusion(body_text, reserve=len(TRUNCATION_MARKER))
+        if was_truncated:
+            conclusion = TRUNCATION_MARKER + conclusion
+        if r.get("status") == "final":
+            # Two ways a seed gets to final, and only one is ours (#102). Our own write is
+            # byte-reproducible from the RIS body (the strip + clamp + marker above), so a
+            # matching conclusion is a previous cycle's work: quiet idempotent skip. A
+            # differing conclusion is a stale rehearsal finalize that predates the read; the
+            # human sign has NOT reached fhir2, and silence here cost a live demo study
+            # (s50279568, 2026-08-06).
+            if r.get("conclusion") == conclusion:
+                missing.pop(report_id, None)
+                bridged.add(report_id)
+                continue
+            if not OVERWRITE_STALE_FINAL:
+                # Not added to `bridged`: keep retrying so a run-book restage (seed back to
+                # preliminary) is picked up on the next cycle, and reuse the miss cadence so
+                # the refusal stays visible without per-cycle spam.
+                _note_miss(missing, report_id,
+                           f"seeded DiagnosticReport/{fhir_id} for {accession} is already "
+                           f"final with a DIFFERENT conclusion ({len(r.get('conclusion') or '')} "
+                           f"chars stored vs {len(body_text)} signed); REFUSING to overwrite -- "
+                           f"restage the study or set BRIDGE_OVERWRITE_STALE_FINAL=1")
+                continue
+            print(f"report {report_id}: seeded DiagnosticReport/{fhir_id} for {accession} was "
+                  f"already final with a different conclusion "
+                  f"({len(r.get('conclusion') or '')} chars stored vs {len(body_text)} signed); "
+                  f"BRIDGE_OVERWRITE_STALE_FINAL is set, projecting the human sign over it",
+                  flush=True)
+        missing.pop(report_id, None)
         if was_truncated:
             print(f"report {report_id}: signed body is {len(body_text)} chars but fhir2 caps "
                   f"conclusion at {FHIR2_CONCLUSION_MAX}; keeping the FINDINGS/IMPRESSION end "
                   f"WITH an in-band marker -- downstream verification sees a partial body",
                   flush=True)
-            conclusion = TRUNCATION_MARKER + conclusion
         r["conclusion"] = conclusion
         r["status"] = "final"
         # Stamp the signer as performer (#93): a UI sign attributes the report, so the bridged

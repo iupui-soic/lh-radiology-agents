@@ -585,6 +585,10 @@ services:
       # projects a radiologist's signed report (#89). omrs_client.find_seeded_report has
       # been running on its hardcoded default since !111 for want of this line.
       FHIR2_PRESIGN_REPORT_CONCEPT: ${FHIR2_PRESIGN_REPORT_CONCEPT:-e3641471-3f25-57b4-ab27-a3ebc66e481e}
+      # What to do when a sign lands on a seed already finalized by a rehearsal (#102).
+      # Unset/empty = refuse loudly and keep retrying (a restage clears it); 1 = project
+      # the human sign over the stale final. A per-deployment call, like the CXR threshold.
+      BRIDGE_OVERWRITE_STALE_FINAL: ${BRIDGE_OVERWRITE_STALE_FINAL:-}
     depends_on:
       mariadb:
         condition: service_started
