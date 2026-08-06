@@ -19,10 +19,12 @@ def test_lean_study_projects_all_common_fields():
         "MainDicomTags": {
             "StudyInstanceUID": "1.2.840.113619.2.55.3.111111111",
             "AccessionNumber":  "ACC-AORTA-001",
-            "ModalitiesInStudy": "CT",
             "StudyDescription": "CT AORTA W CONTRAST",
             "StudyDate":        "20260707",
         },
+        # The modality is a computed tag: it arrives in RequestedTags, never in a study's
+        # MainDicomTags (the fixture mirrors a live /studies?expand&requestedTags record).
+        "RequestedTags": {"ModalitiesInStudy": "CT"},
         "LastUpdate": "20260707T123005",
     }
     out = _lean_study(raw)
@@ -37,11 +39,28 @@ def test_lean_study_projects_all_common_fields():
     }
 
 
-def test_lean_study_prefers_modalitiesinstudy_but_falls_back_to_modality():
-    """Some builds only populate the single-modality Modality tag; the lean
-    projector must find it either way."""
-    raw = {"ID": "x", "MainDicomTags": {"Modality": "MR"}}
-    assert _lean_study(raw)["modality"] == "MR"
+def test_lean_study_reads_modality_from_requested_tags():
+    """The shape a real /studies?expand&requestedTags=ModalitiesInStudy record has: the
+    computed tag arrives in a RequestedTags block, NEVER in the study's MainDicomTags
+    (Modality is series-level; verified live on Orthanc). Pinned so the silent-empty
+    modality column cannot come back."""
+    raw = {"ID": "x",
+           "MainDicomTags": {"StudyInstanceUID": "1.2.3"},
+           "RequestedTags": {"ModalitiesInStudy": "CR"}}
+    assert _lean_study(raw)["modality"] == "CR"
+
+
+def test_lean_study_passes_multi_modality_value_through():
+    """A multi-modality study carries the full backslash-separated DICOM value."""
+    raw = {"ID": "x", "RequestedTags": {"ModalitiesInStudy": "CT\\SR"}}
+    assert _lean_study(raw)["modality"] == "CT\\SR"
+
+
+def test_lean_study_falls_back_to_maindicomtags_modality_keys():
+    """A deployment that promotes the tag via ExtraMainDicomTags (or hands a series-shaped
+    record to the projector) must still find it."""
+    assert _lean_study({"ID": "x", "MainDicomTags": {"ModalitiesInStudy": "CT"}})["modality"] == "CT"
+    assert _lean_study({"ID": "x", "MainDicomTags": {"Modality": "MR"}})["modality"] == "MR"
 
 
 def test_lean_study_tolerates_missing_maindicomtags():
@@ -73,8 +92,9 @@ def test_list_completed_studies_uses_expand_single_round_trip():
     client._get = fake_get  # type: ignore[assignment]
     studies = asyncio.run(client.list_completed_studies())
     # Single round trip via ?expand=1 — critical for the join in the Worklist API
-    # to stay O(1) rather than N+1 as the worklist grows.
-    assert calls == [("studies", {"expand": True})]
+    # to stay O(1) rather than N+1 as the worklist grows. requestedTags rides the same
+    # call: it is the only way the modality reaches the row (see list_completed_studies).
+    assert calls == [("studies", {"expand": True, "requestedTags": "ModalitiesInStudy"})]
     assert [s["orthancStudyId"] for s in studies] == ["s1", "s2"]
 
 

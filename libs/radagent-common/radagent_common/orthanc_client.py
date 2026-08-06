@@ -230,8 +230,17 @@ class OrthancClient:
         return await self._get_bytes(f"instances/{instance_id}/file")
 
     async def list_completed_studies(self) -> list[dict]:
-        """Reading worklist source (#20). Every study Orthanc knows about, projected lean."""
-        raw = await self._get("studies", params={"expand": True})
+        """Reading worklist source (#20). Every study Orthanc knows about, projected lean.
+
+        requestedTags is how the modality reaches the row: a study record's MainDicomTags
+        never carry one (Modality is a series-level tag, and ModalitiesInStudy is a computed
+        tag Orthanc only returns when explicitly requested), so without it every worklist row
+        shows an empty modality column. Asking here rather than via ExtraMainDicomTags config
+        keeps already-ingested studies covered -- the config route only applies to studies
+        stored after the change.
+        """
+        raw = await self._get(
+            "studies", params={"expand": True, "requestedTags": "ModalitiesInStudy"})
         return [_lean_study(s) for s in raw or []]
 
     async def get_instance_tags(self, orthanc_instance_id: str) -> dict:
@@ -554,7 +563,12 @@ def _lean_study(raw: dict) -> dict:
         "orthancStudyId":   raw.get("ID", ""),
         "studyInstanceUID": main_tags.get("StudyInstanceUID", ""),
         "accessionNumber":  main_tags.get("AccessionNumber", ""),
-        "modality":         main_tags.get("ModalitiesInStudy") or main_tags.get("Modality", ""),
+        # Computed tags land in a RequestedTags block, not MainDicomTags (which on a study
+        # record can never hold a modality -- see list_completed_studies). The MainDicomTags
+        # fallbacks stay for deployments whose Orthanc promotes the tag via ExtraMainDicomTags.
+        "modality":         (raw.get("RequestedTags") or {}).get("ModalitiesInStudy")
+                            or main_tags.get("ModalitiesInStudy")
+                            or main_tags.get("Modality", ""),
         "studyDescription": main_tags.get("StudyDescription", ""),
         "studyDate":        main_tags.get("StudyDate", ""),
         "lastUpdate":       raw.get("LastUpdate", ""),
