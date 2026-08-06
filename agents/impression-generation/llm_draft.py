@@ -350,7 +350,23 @@ async def draft_impression(
             ehr_summary=_summarize_ehr_context(ehr_context),
         )
         content = await _chat_completion(base_url, model, api_key, timeout, prompt)
-        return _parse_draft(content, critical_flags)
+        try:
+            return _parse_draft(content, critical_flags)
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as first:
+            # One retry, and only for a reply we could not use (#103). The model answered, so the
+            # endpoint and the key are fine; it emitted a raw newline or an unescaped quote inside
+            # a string, or skipped the recommendation a critical finding needs. Sampling is not
+            # deterministic even at temperature 0.2, so asking again usually lands. Measured on
+            # the demo host after the prompt hardening: 2 of 28 studies still failed to parse,
+            # and each cost a real LLM impression.
+            #
+            # Deliberately NOT retried: transport failures. Those already cost the full timeout,
+            # and this call sits in front of a radiologist's read -- a second timeout would double
+            # the wait for prose that is advisory anyway.
+            _log.warning("impression LLM draft malformed: %s: %s; retrying once",
+                         first.__class__.__name__, first)
+            content = await _chat_completion(base_url, model, api_key, timeout, prompt)
+            return _parse_draft(content, critical_flags)
     except (httpx.InvalidURL, httpx.UnsupportedProtocol) as e:
         _log.warning("impression LLM draft skipped: unusable IMPRESSION_LLM_BASE_URL (%s)", e.__class__.__name__)
     except httpx.HTTPStatusError as e:
