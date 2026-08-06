@@ -17,7 +17,7 @@ origin the #75 Caddy overlay serves. Nothing else is reachable off-box.
 | RIS / OpenMRS login | `https://demo.example.org/openmrs/login.htm` | radiologist's own OpenMRS account |
 | RIS order page (Claim Report) | `https://demo.example.org/openmrs/module/radiology/radiologyOrder.form?orderId=<uuid>` — reached via the viewer's **Report this study** action | OpenMRS session |
 | Patient chart (referring MD) | `https://demo.example.org/openmrs` → find patient → chart shows the **AI critical result notification** entry | physician's own OpenMRS account |
-| Critical-result ack (phone) | `https://demo.example.org/reading-api/ack/<taskId>?sig=…` — the signed link inside the chart notification | HTTP Basic → physician's OpenMRS account |
+| Critical-result ack (phone) | `https://demo.example.org/reading-api/ack/<taskId>?sig=…` — the signed link inside the chart notification | physician's OpenMRS account (live session if the link sits under `/openmrs`, else an HTTP Basic prompt) |
 | Sign-off override (phone) | `https://demo.example.org/ingress/signoff/<workflowId>/override` — the link inside the escalation page | `SIGNOFF_OVERRIDE_TOKEN` |
 | Jaeger (choreography visual) | presenter laptop: `ssh -L 16686:127.0.0.1:16686 demo@<host>` → `http://localhost:16686` | SSH only (loopback-bound on the host) |
 | Temporal UI (backstage only) | tunnel `8088` the same way → `http://localhost:8088` | SSH only |
@@ -32,7 +32,11 @@ origin the #75 Caddy overlay serves. Nothing else is reachable off-box.
 3. Flags on, each with its recorded sign-off: `ORTHANC_PRESIGN_WRITE_ENABLED=1`,
    `EHR_INBOX_WRITE_ENABLED=1`, `PATCH_PRESIGN_IMPRESSION`, `CRITCOM_ACK_HMAC_SECRET` set and
    `CRITCOM_ACK_BASE_URL=https://demo.example.org/reading-api`, LLM keys for impression/comms
-   prose (both degrade to deterministic text if unset).
+   prose (both degrade to deterministic text if unset). `CRITCOM_ACK_HMAC_SECRET` must be the
+   SAME value on `communications` (which signs the link) and `worklist-api` (which verifies it);
+   both read it, and verification fails closed when it is empty. The `/reading-api` base URL
+   means the ack asks for a login rather than reusing the physician's OpenMRS session: see arc
+   2 step 6 for why, and what to change if you want the one-click path.
 4. Accounts: each radiologist has their own OpenMRS user; the referring-physician demo account
    password is known; the ack/override phone is on wifi that can reach the demo origin.
 5. OpenMRS seed captured once (`scripts/dump_openmrs_seed.sh`) so recovery never costs the
@@ -79,8 +83,19 @@ origin the #75 Caddy overlay serves. Nothing else is reachable off-box.
    physician): the **AI critical result notification** entry is on the chart — finding label +
    accession + the signed ack link, never the narrative.
 6. **Phone on camera:** tap the ack link
-   (`https://demo.example.org/reading-api/ack/<taskId>?sig=…`) → HTTP Basic prompt → the
-   physician's own OpenMRS credentials → "acknowledged" page. Re-tap: idempotent.
+   (`https://demo.example.org/reading-api/ack/<taskId>?sig=…`). Two taps, by design (!114):
+   the link opens a **confirmation page** naming who the acknowledgement will be attributed
+   to, and only the **Acknowledge** button on it attests. Opening the link never acknowledges
+   anything, so a preloading browser, a restored tab or a scanner cannot attest on the
+   physician's behalf. Re-tap: idempotent.
+   - **Identity comes first, and how depends on the route.** The signature is checked before
+     any credential is solicited, so a forged link 403s without ever prompting. Then, if the
+     browser sends a live OpenMRS `JSESSIONID`, the page is one click with no login. It only
+     sends that cookie when the ack URL rides under the cookie's `/openmrs` path, and
+     `CRITCOM_ACK_BASE_URL` currently points at `/reading-api`, so **on the host today expect
+     the HTTP Basic prompt first**, then the confirmation page. That is the supported
+     fallback, not a fault. To demo the one-click path instead, route the ack under
+     `/openmrs` and point `CRITCOM_ACK_BASE_URL` there.
 7. **Close the loop verbally:** the ledger Task is COMPLETED with the acknowledger's identity on
    it, `comms.checkAck` reads COMPLETED, no escalation fires. (Backstage proof if asked:
    Temporal UI over the tunnel, the workflow's `ackStatus`.)
