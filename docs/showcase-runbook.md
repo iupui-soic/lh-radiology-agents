@@ -156,15 +156,15 @@ the drift class behind #83 cannot recur. Only in an announced window, never mid-
    lists one and forgets the other leaves half the RIS bridge on an old build.
    `--no-deps` is load-bearing: the stateful set (openmrs, mariadb, orthanc and its volume,
    temporal's postgres, the comms ledger) is never touched by a deploy.
-3. **Restart `ohif` last, every time, even when its own image did not change** (#104):
-   ```bash
-   docker compose -f docker-compose.yml -f docker-compose.tls.yml restart ohif
-   ```
-   OHIF's nginx resolves `worklist-api`, `orthanc` and `orchestrator` once at container start and
-   holds those IPs. A recreated upstream gets a NEW ip, so nginx keeps dialling the old one and
-   `/reading` answers 502 while every other check passes: the API is healthy, Caddy reaches it,
-   the rows are all there. On 2026-08-06 that cost four and a half hours of a dead reading
-   worklist, unnoticed because the deploy was verified through the API instead of the page.
+3. `ohif` no longer needs a routine restart after a deploy. Since #104 its nginx resolves
+   `worklist-api`, `orthanc` and the orchestrator per request through Docker's embedded DNS
+   (variable `proxy_pass` + `resolver` in `docker/ohif/default.conf`), so a recreated upstream
+   is picked up within seconds. One deliberate exception, because that conf is volume-mounted
+   from the checkout: when the `git pull` in step 2 changed `docker/ohif/default.conf` itself,
+   run `docker compose -f docker-compose.yml -f docker-compose.tls.yml restart ohif` once so
+   nginx loads the new conf. Before #104 a stale pinned IP cost four and a half hours of
+   `/reading` 502 (2026-08-06) while every API-level check passed; the browser smoke in step 5
+   is the guard that keeps that class of failure visible.
 4. Pin what reviewers see: `APP_IMAGE_TAG=vX.Y.Z` (or a short SHA for an urgent fix) in the
    host env steers which published tag the pull fetches; unset means `main`. Pulls are
    anonymous -- the project registry is public, the host needs no token.
