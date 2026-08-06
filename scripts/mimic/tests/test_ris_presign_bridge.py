@@ -371,3 +371,71 @@ def test_bridge_report_skip_no_basedOn(monkeypatch):
     outcome = bridge.bridge_report(conn=None, resource=r, service_user_id=7)
 
     assert "skip-no-basedOn" in outcome
+
+
+# --- #100: the RIS will not save a body over 255 chars ----------------------
+#
+# The mariadb column is longtext, so an over-long INSERT lands and looks fine. The cap is
+# module-side, on save: OpenMRS core validates RadiologyReport.body against hibernate's
+# default 255. So the failure is not a write error here, it is the radiologist opening a
+# populated Diagnosis field and then being unable to Complete the report at all -- strictly
+# worse than the empty field this bridge exists to fix. These pin the clamp.
+
+def test_clamp_leaves_a_short_conclusion_exactly_alone():
+    text = "Small right apical pneumothorax."
+    assert bridge.clamp_body(text) == (text, False)
+
+
+def test_clamp_fits_a_long_conclusion_under_the_limit():
+    text, truncated = bridge.clamp_body("x" * 5000)
+    assert truncated
+    assert len(text) <= bridge.RIS_REPORT_BODY_MAX
+
+
+def test_clamp_keeps_the_head_not_the_tail():
+    """An impression leads with the finding. report_text.clamp_conclusion keeps the TAIL,
+    which is right for a whole narrative ending in IMPRESSION and wrong here: cutting the
+    front of an impression strands the hedge and drops the diagnosis."""
+    text, _ = bridge.clamp_body("PNEUMOTHORAX. " + "filler " * 200)
+    assert text.startswith("PNEUMOTHORAX.")
+
+
+def test_clamp_marks_the_cut_visibly():
+    """A silently shortened impression reads as the AI's whole opinion, and the radiologist
+    signs it. The cut has to be visible in the field they are about to edit."""
+    text, _ = bridge.clamp_body("y" * 5000)
+    assert text.endswith(bridge.TRUNCATION_MARKER)
+
+
+def test_bridge_report_writes_the_clamped_body(monkeypatch):
+    monkeypatch.setattr(bridge, "order_id_for_uuid", lambda conn, u: 42)
+    monkeypatch.setattr(bridge, "existing_report", lambda conn, oid: None)
+    insert_calls = []
+    monkeypatch.setattr(bridge, "insert_draft",
+                        lambda conn, oid, body, uid: insert_calls.append(body) or 99)
+    _drop_sql(monkeypatch, "update_draft_body")
+
+    bridge.bridge_report(conn=None,
+                        resource=_ai_resource(conclusion="z" * 5000),
+                        service_user_id=7)
+
+    assert len(insert_calls[0]) <= bridge.RIS_REPORT_BODY_MAX
+
+
+def test_a_clamped_row_reads_as_noop_not_as_a_radiologist_edit(monkeypatch):
+    """The reason the clamp happens once at the top of bridge_report rather than at the write
+    site. Clamp only on write and the noop-same-text comparison still holds the FULL
+    conclusion, so it never matches the clamped row: every later cycle reports skip-touched,
+    which is the bridge claiming a radiologist edited a row it wrote itself."""
+    clamped, _ = bridge.clamp_body("w" * 5000)
+    monkeypatch.setattr(bridge, "order_id_for_uuid", lambda conn, u: 42)
+    monkeypatch.setattr(bridge, "existing_report", lambda conn, oid: (5, "DRAFT", clamped))
+    _drop_sql(monkeypatch, "insert_draft")
+    _drop_sql(monkeypatch, "update_draft_body")
+
+    outcome = bridge.bridge_report(conn=None,
+                                   resource=_ai_resource(conclusion="w" * 5000),
+                                   service_user_id=7)
+
+    assert "noop-same-text" in outcome
+    assert "skip-touched" not in outcome
