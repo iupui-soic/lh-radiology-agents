@@ -1,4 +1,7 @@
 """Contract test + selection tests for interpretation assistant."""
+import json
+from pathlib import Path
+
 import pytest
 
 from handler import handle
@@ -357,3 +360,45 @@ def test_a_region_named_but_not_the_subject_does_not_select_its_tools(modality, 
 def test_the_exclusions_do_not_cost_the_real_studies(modality, description, expected):
     """The exclusion refuses a region; it must not refuse the studies the region exists for."""
     assert select_tools(modality, description) == expected
+
+
+# --- the real corpus: every distinct study name the showcase PACS actually sends (#64) ---------
+#
+# Captured from the deployed Orthanc by scripts/audit_registry_selection.py, not written from
+# memory -- inventing these names is how #63 and the !53 over-matches got in. The fixture pins the
+# selection for every distinct (modality, StudyDescription) in the #68 cohort, so the next naming
+# convention that appears in the PACS shows up here as a diff, caught by CI instead of by review.
+# CXR-only cohort, so this validates the chest/CXR matching; the CT rows above stay the coverage
+# for CT names until real CT studies land (PI's #64 caveat).
+
+_CORPUS = json.loads(
+    (Path(__file__).parent / "fixtures" / "orthanc_studydescription_corpus.json").read_text()
+)
+
+
+def test_corpus_fixture_is_not_empty():
+    assert _CORPUS["rows"], "an empty corpus would pass every test below by vacuity"
+
+
+@pytest.mark.parametrize(
+    "row", _CORPUS["rows"],
+    ids=[f"{r['modality']}-{r['studyDescription']}" for r in _CORPUS["rows"]],
+)
+def test_every_real_study_name_selects_exactly_what_the_corpus_pins(row):
+    assert select_tools(row["modality"], row["studyDescription"]) == row["tools"]
+
+
+@pytest.mark.parametrize(
+    "row", _CORPUS["rows"],
+    ids=[f"{r['modality']}-{r['studyDescription']}" for r in _CORPUS["rows"]],
+)
+def test_no_real_study_falls_to_the_generic_screen_or_to_nothing(row):
+    """Both #63 directions over the real distribution: every study the showcase PACS sends gets a
+    regional tool -- none is generic-only, none selects nothing. In particular every row keeps
+    pneumothorax-detect, the one live CAD (#71): lose the chest match for a real name and the
+    only non-stubbed tool in the pipeline silently stops running on that study."""
+    tools = select_tools(row["modality"], row["studyDescription"])
+    assert tools, "selected nothing: modality missing from the registry"
+    assert any(t not in {"generic-ct-screen", "generic-mr-screen", "generic-xr-screen",
+                         "generic-us-screen", "mammo-screen"} for t in tools)
+    assert "pneumothorax-detect" in tools
