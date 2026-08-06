@@ -34,8 +34,6 @@ import os
 import time
 import uuid
 
-import pymysql
-
 from omrs_client import OmrsClient
 
 POLL_SECONDS = int(os.environ.get("BRIDGE_POLL_SECONDS", "10"))
@@ -70,11 +68,18 @@ SERVICE_USER_SYSTEM_ID = os.environ.get(
 def connect_db():
     """Fresh pymysql connection, matching ris_sign_bridge's config surface.
 
+    ``import pymysql`` lives INSIDE this function on purpose (!107 review round 3):
+    the mimic-etl-tests CI lane installs no pymysql (DB-path-only dependency, the
+    same treatment omrs_client._db() and ris_sign_bridge.connect() use), and a
+    module-level import would fail collection for every test that touches this
+    module -- taking the whole test suite down with it.
+
     ``autocommit=True`` is the default for INSERT/UPDATE of ``radiology_report``
     rows (single-statement, order-scoped, safe under a rare double-fire). The
     initial service-user bootstrap flips this off for the multi-statement
     person + person_name + users triple; see ``ensure_service_user``.
     """
+    import pymysql
     return pymysql.connect(
         host=os.environ.get("OMRS_DB_HOST", "mariadb"),
         port=int(os.environ.get("OMRS_DB_PORT", "3306")),
@@ -261,49 +266,85 @@ def service_request_uuid(resource: dict):
     return None
 
 
+def _bundle_next_link(bundle: dict):
+    """The absolute URL of the Bundle's `next` page, if the server paged the result.
+
+    Same shape fhir_client._bundle_next_link uses (#12): fhir2 returns a Bundle with a
+    `link` array containing `{"relation": "next", "url": "<absolute URL with cursor
+    baked in>"}` when there are more pages past `_count`. Absent when we are on the
+    last page.
+    """
+    for link in bundle.get("link", []) or []:
+        if isinstance(link, dict) and link.get("relation") == "next":
+            return link.get("url")
+    return None
+
+
 def poll_fhir_reports(c: OmrsClient, cursor_iso: str) -> tuple[list, str]:
     """AI-authored preliminary DiagnosticReports updated since `cursor_iso`.
 
-    Returns (matching_reports, latest_lastUpdated_from_raw_bundle).
+    Returns (matching_reports, latest_lastUpdated_across_all_pages).
+
+    Pagination is real (!107 round 3): fhir2 serves at most `_count` (50) resources per
+    page and includes a `next` link when there are more. Fetching only the first page
+    and computing high-water from those 50 resources means an AI draft on page 2 could
+    have an earlier `lastUpdated` than page 1's max (fhir2's `_sort=_lastUpdated` is
+    best-effort, not guaranteed) -- the cursor would advance past that draft on the
+    next poll and it would be missed forever. Same shape @sunbiz's #12 acceptance
+    fix landed for fhir_client.poll_finalized_reports.
+
+    So: follow every `next` link and compute the high-water as the MAX `lastUpdated`
+    across ALL entries seen across ALL pages -- not the last page's max, and not
+    just the filtered-match set. Any resource whatsoever moves the cursor past
+    itself; matching (preliminary + AI-stamped) only decides which get returned to
+    the caller for bridging.
 
     fhir2 doesn't accept `status` as a search parameter on this build (400s), same
-    as the ris_sign_bridge design note observes. So we search by `_lastUpdated`
-    only and filter client-side on both status and our concept stamp.
-
-    The latest lastUpdated returned is derived from the RAW bundle -- every
-    resource we saw, not just the ones that survived filtering -- per @sunbiz's
-    !107 review. If we only advanced the cursor from filtered matches, a page of
-    50 non-matching resources (a burst of `final` DiagnosticReports as radiologists
-    sign, or humans' own preliminary drafts) would leave the cursor stuck and we
-    would refetch the same page every 10s forever, never seeing anything past it.
-    At cohort scale that scenario is likely rather than theoretical.
+    as the ris_sign_bridge design note observes. So the search is by `_lastUpdated`
+    only and both the status filter (`preliminary`) and the AI-stamp filter run
+    client-side inside this loop.
     """
+    matching: list = []
+    high_water = cursor_iso  # only ever moves forward
+
+    # First page: relative fhir2 path via OmrsClient._fget so auth/base URL are set up
+    # by the client's own config; subsequent pages come from `next` links which are
+    # absolute URLs and go straight through the client's http session.
     bundle = c._fget(
         "DiagnosticReport",
         {"_lastUpdated": f"ge{cursor_iso}", "_sort": "_lastUpdated", "_count": "50"},
     )
-    matching: list = []
-    latest_lu = cursor_iso  # only ever advances forward
-    for entry in bundle.get("entry", []) or []:
-        r = entry.get("resource") or {}
-        if r.get("resourceType") != "DiagnosticReport":
-            continue
+    while True:
+        for entry in bundle.get("entry", []) or []:
+            r = entry.get("resource") or {}
+            if r.get("resourceType") != "DiagnosticReport":
+                continue
 
-        # Advance the cursor from the RAW stream so non-matching resources still
-        # move it forward -- otherwise a page with no AI-stamped preliminary
-        # wedges the poll cycle. Doing this before the status/stamp filter is the
-        # whole point of the fix.
-        lu = (r.get("meta") or {}).get("lastUpdated")
-        if lu and lu > latest_lu:
-            latest_lu = lu
+            # Advance high-water from the RAW stream so non-matching resources
+            # still move it forward -- otherwise a page of finals or humans'
+            # preliminaries would wedge the poll cursor forever. Done before the
+            # status/stamp filter on purpose.
+            lu = (r.get("meta") or {}).get("lastUpdated")
+            if lu and lu > high_water:
+                high_water = lu
 
-        # Now filter for what we actually want to bridge.
-        if r.get("status") != "preliminary":
-            continue
-        if not has_our_stamp(r):
-            continue
-        matching.append(r)
-    return matching, latest_lu
+            # Now filter for what we want to bridge.
+            if r.get("status") != "preliminary":
+                continue
+            if not has_our_stamp(r):
+                continue
+            matching.append(r)
+
+        next_url = _bundle_next_link(bundle)
+        if not next_url:
+            break
+        # The next link is an absolute URL with its cursor baked into the query
+        # string; reuse OmrsClient's http session for its shared auth setup.
+        resp = c._http.get(next_url)
+        resp.raise_for_status()
+        bundle = resp.json()
+
+    return matching, high_water
 
 
 def bridge_report(conn, resource: dict, service_user_id: int) -> str:
@@ -370,7 +411,7 @@ def main() -> None:
                 service_user_id = ensure_service_user(conn)
                 print(f"  service user id: {service_user_id}", flush=True)
 
-            reports, latest_lu = poll_fhir_reports(c, cursor_iso)
+            reports, high_water = poll_fhir_reports(c, cursor_iso)
             for r in reports:
                 try:
                     outcome = bridge_report(conn, r, service_user_id)
@@ -378,10 +419,10 @@ def main() -> None:
                 except Exception as e:  # noqa: BLE001 -- keep the bridge alive per-item
                     print(f"  {r.get('id', '?')}: ERROR {e!r}", flush=True)
 
-            # Advance the cursor once per cycle, from the raw-bundle max, so a
-            # page of non-matching resources still moves us forward.
-            if latest_lu > cursor_iso:
-                cursor_iso = latest_lu
+            # Advance the cursor once per cycle from the high-water across all
+            # pages so non-matching resources still move us forward.
+            if high_water > cursor_iso:
+                cursor_iso = high_water
         except Exception as e:  # noqa: BLE001 -- transient outages must not kill the bridge
             print(f"bridge cycle error: {e!r}", flush=True)
             conn = None
