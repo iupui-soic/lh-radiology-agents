@@ -147,6 +147,9 @@ state, so the compose file was hardened (#72):
 - **Images are pinned to digests** (`name:tag@sha256:...`) so the demo host cannot
   drift under a re-pushed tag. Bump a digest deliberately when adopting a new build;
   `jaeger` (opt-in `otel` profile) keeps an explicit version tag. **Exception: the
-  `openmrs` (o3) image rides its tag** — o3:o3 is a moving tag whose superseded
-  manifests GitLab's registry garbage-collects, so a digest pin there 404s on any
-  fresh host after the next upstream push (see the comment in `docker-compose.yml`).
+  `openmrs` (o3) image is pinned by an immutable per-commit TAG**, not a digest.
+  o3:o3 is a moving tag whose superseded manifests GitLab's registry garbage-collects,
+  so a digest pin there 404s on any fresh host after the next upstream push. lh-radiology
+  CI publishes `o3:<branch>-<short-sha>` alongside the moving tag and never re-pushes it,
+  so that is what `docker-compose.yml` rides (see the comment there for why a `@sha256`
+  suffix cannot be used on a service that also has a `build:` block).
