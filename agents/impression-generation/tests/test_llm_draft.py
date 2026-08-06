@@ -126,17 +126,88 @@ async def test_malformed_json_degrades_to_none(monkeypatch, caplog):
     assert "JSONDecodeError" in caplog.text
 
 
-async def test_empty_recommendations_degrades_to_none(monkeypatch, caplog):
+async def test_empty_recommendations_accepted_without_critical_flags(monkeypatch):
+    """A normal study warrants no recommendation, and the model says so with [] (#103).
+
+    This used to be rejected as malformed, which discarded the LLM draft for most of a screening
+    cohort -- 11 of 12 studies on the demo host -- while every deployment check said the feature
+    was on, because the fallback to the template is silent by design.
+    """
     _clear(monkeypatch)
     _configure(monkeypatch)
-    content = '{"impressionText": "No acute findings.", "recommendations": []}'
+    content = '{"impressionText": "No acute cardiopulmonary abnormality.", "recommendations": []}'
+    transport, _ = _responding(200, content=content)
+    _install(monkeypatch, transport)
+    out = await draft_impression(conclusion="", finding_labels="", critical_flags=[], ehr_context={})
+    assert out == LLMDraft(impression_text="No acute cardiopulmonary abnormality.", recommendations=[])
+
+
+async def test_empty_recommendations_still_refused_beside_a_critical_flag(monkeypatch, caplog):
+    """Where a recommendation is load-bearing, silence is not acceptable (#103).
+
+    Prose that names a confirmed critical finding and then advises nothing reads as reassurance,
+    so this keeps falling back to the deterministic template, which does carry an action.
+    """
+    _clear(monkeypatch)
+    _configure(monkeypatch)
+    content = '{"impressionText": "Pneumothorax is present.", "recommendations": []}'
+    transport, _ = _responding(200, content=content)
+    _install(monkeypatch, transport)
+    out = await draft_impression(
+        conclusion="", finding_labels="pneumothorax", critical_flags=CRITICAL_FLAGS, ehr_context={},
+    )
+    assert out is None
+    assert "no recommendations alongside a confirmed critical flag" in caplog.text
+
+
+async def test_non_string_recommendations_still_rejected(monkeypatch, caplog):
+    _clear(monkeypatch)
+    _configure(monkeypatch)
+    content = '{"impressionText": "No acute findings.", "recommendations": [{"text": "Follow up."}]}'
     transport, _ = _responding(200, content=content)
     _install(monkeypatch, transport)
     out = await draft_impression(conclusion="", finding_labels="", critical_flags=[], ehr_context={})
     assert out is None
-    # The reason string distinguishes this from the other rejection kinds in production logs --
-    # previously every rejection logged identically as "malformed: ValueError" (#77 follow-up).
-    assert "malformed or empty recommendations" in caplog.text
+    assert "malformed recommendations" in caplog.text
+
+
+async def test_trailing_commentary_after_the_json_is_tolerated(monkeypatch):
+    """Backends decorate the object despite response_format (#103): "Extra data" threw the draft away."""
+    _clear(monkeypatch)
+    _configure(monkeypatch)
+    content = (
+        'Here is the impression:\n'
+        '{"impressionText": "No acute findings.", "recommendations": ["Routine follow-up."]}\n'
+        'Let me know if you would like it shortened.'
+    )
+    transport, _ = _responding(200, content=content)
+    _install(monkeypatch, transport)
+    out = await draft_impression(conclusion="", finding_labels="", critical_flags=[], ehr_context={})
+    assert out == LLMDraft(impression_text="No acute findings.", recommendations=["Routine follow-up."])
+
+
+async def test_brace_inside_the_prose_does_not_unbalance_the_scan(monkeypatch):
+    _clear(monkeypatch)
+    _configure(monkeypatch)
+    content = '{"impressionText": "Density measures 40 HU {sic}.", "recommendations": ["Correlate."]} trailing'
+    transport, _ = _responding(200, content=content)
+    _install(monkeypatch, transport)
+    out = await draft_impression(conclusion="", finding_labels="", critical_flags=[], ehr_context={})
+    assert out == LLMDraft(impression_text="Density measures 40 HU {sic}.", recommendations=["Correlate."])
+
+
+async def test_fallback_is_counted_and_logged(monkeypatch, caplog):
+    """The #103 failure mode was silence, not error: every check looked healthy while the feature
+    was inert. A running tally makes the rate visible without diffing outputs."""
+    _clear(monkeypatch)
+    _configure(monkeypatch)
+    monkeypatch.setattr(llm_draft, "_ATTEMPTS", 0)
+    monkeypatch.setattr(llm_draft, "_FALLBACKS", 0)
+    transport, _ = _responding(200, content="not json at all")
+    _install(monkeypatch, transport)
+    out = await draft_impression(conclusion="", finding_labels="", critical_flags=[], ehr_context={})
+    assert out is None
+    assert "fell back to the deterministic template (1 of 1 attempts since start)" in caplog.text
 
 
 async def test_prose_not_mentioning_critical_flag_degrades_to_none(monkeypatch, caplog):
