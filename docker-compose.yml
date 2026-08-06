@@ -584,11 +584,6 @@ services:
       # This bridge reads the concept to MATCH the AI's draft, the opposite direction from
       # ris-sign-bridge above. Move the concept in a deployment and both follow.
       FHIR2_PRESIGN_REPORT_CONCEPT: ${FHIR2_PRESIGN_REPORT_CONCEPT:-e3641471-3f25-57b4-ab27-a3ebc66e481e}
-      # Until #100 lands, OpenMRS core validates RadiologyReport.body against hibernate's
-      # default 255 chars, so a longer draft would populate the Diagnosis field and then block
-      # the radiologist from completing the report. The bridge clamps to fit, leaving room for
-      # the wrapper TinyMCE adds on save. Raise this to match once #100 ships.
-      RIS_REPORT_BODY_MAX: ${RIS_REPORT_BODY_MAX:-240}
     depends_on:
       mariadb:
         condition: service_started

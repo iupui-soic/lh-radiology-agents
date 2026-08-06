@@ -64,35 +64,18 @@ SERVICE_USER_SYSTEM_ID = os.environ.get(
     "RIS_PRESIGN_BRIDGE_USERNAME", "ai-presign-bridge"
 )
 
-# How long a report_body the RIS will accept (#100). The mariadb column is longtext, so the
-# INSERT here always lands -- the cap is module-side: OpenMRS core validates RadiologyReport.body
-# against hibernate metadata, which declares no length and so reports its default of 255. A
-# bridge-written draft over that populates the Diagnosis field and THEN refuses to save, which
-# is worse than an empty field: the radiologist cannot complete the report at all. The default
-# holds back room for the <p> wrapper TinyMCE adds when the form saves (a 178-char narrative
-# plus the wrapper is what tipped #100 over live).
+# NO length clamp on report_body, deliberately (#100). This file briefly carried one, capping
+# the body at 240 chars, because OpenMRS core validated RadiologyReport.body against hibernate
+# metadata that declared no length and so reported its default of 255: a longer draft populated
+# the Diagnosis field and then refused to save, stranding the radiologist. lh-radiology!91 maps
+# the property `type="text"` to match the longtext the schema already declares, so that cap is
+# gone, and the o3 pin here rides the build that carries it.
 #
-# So this is a workaround with a shelf life. When the length fix lands in the o3 sibling repo,
-# raise RIS_REPORT_BODY_MAX to match and the clamp stops firing on its own.
-RIS_REPORT_BODY_MAX = int(os.environ.get("RIS_REPORT_BODY_MAX", "240"))
-
-# In-band and deliberately visible: a silently shortened impression reads as the AI's whole
-# opinion, and the radiologist signs it. The marker makes the cut obvious in the field they are
-# about to edit. Mirrors ris_sign_bridge's TRUNCATION_MARKER in the opposite direction.
-TRUNCATION_MARKER = " [AI draft truncated]"
-
-
-def clamp_body(text: str, limit: int = RIS_REPORT_BODY_MAX) -> tuple[str, bool]:
-    """Fit an AI conclusion into what the RIS will save. Returns (text, was_truncated).
-
-    Keeps the HEAD, unlike report_text.clamp_conclusion, which keeps the tail. That helper
-    fits whole narratives whose IMPRESSION section sits at the end; this one fits an
-    impression, whose leading sentence carries the finding. Cutting its front would strand
-    the radiologist with the hedge and drop the diagnosis.
-    """
-    if len(text) <= limit:
-        return text, False
-    return text[: max(0, limit - len(TRUNCATION_MARKER))] + TRUNCATION_MARKER, True
+# The clamp is not merely obsolete, it is now unreachable: this bridge's input is a fhir2
+# DiagnosticReport.conclusion, and fhir2 rejects a conclusion over 1024 chars outright
+# (report_text.FHIR2_CONCLUSION_MAX, live-bisected). Input bounded at 1024, RIS accepting
+# longtext, so nothing can be truncated. Do not re-add a clamp without first re-checking BOTH
+# of those numbers; a silent truncation here shortens an impression a radiologist then signs.
 
 
 def connect_db():
@@ -389,18 +372,10 @@ def bridge_report(conn, resource: dict, service_user_id: int) -> str:
     if not conclusion:
         return f"{fhir_id}: skip-empty"
 
-    # Clamp once, here, before anything downstream sees the text (#100). Doing it at the write
-    # site instead would leave the noop-same-text comparison below holding the FULL conclusion
-    # while the row holds the clamped one: they would never match, every cycle would read as
+    # The conclusion is written verbatim (#100). If a length limit ever comes back, it belongs
+    # HERE and not at the write site: the noop-same-text comparison below reads the row back, so
+    # a text transformed on write but not on compare would never match, every cycle would report
     # skip-touched, and the bridge would look like it had hit a radiologist's edit.
-    conclusion, was_truncated = clamp_body(conclusion)
-    if was_truncated:
-        print(
-            f"  {fhir_id}: conclusion exceeds RIS_REPORT_BODY_MAX={RIS_REPORT_BODY_MAX} "
-            f"(#100); clamped, full text stays in fhir2",
-            flush=True,
-        )
-
     sr_uuid = service_request_uuid(resource)
     if not sr_uuid:
         return f"{fhir_id}: skip-no-basedOn"
