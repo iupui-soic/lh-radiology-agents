@@ -65,3 +65,74 @@ def test_unknown_verb_is_a_usage_error(stubbed):
         report_seeder.main(["frobnicate", "s51350342"])
     assert e.value.code == 2
     assert stubbed == []
+
+
+def test_restage_returns_the_seed_to_preliminary_so_a_new_sign_can_bridge(monkeypatch, tmp_path):
+    # #102 AC4: a restaged study must be signable again -- the seeded DiagnosticReport back to
+    # `preliminary` (the state ris_sign_bridge projects into) and the RIS rows voided, never
+    # deleted. Fake DB + client, no I/O; the fake pymysql also keeps this collectable in the
+    # mimic-etl-tests lane, which installs none.
+    import json
+    import types
+
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps(
+        [{"study_id": "s1", "report_text": "FINDINGS: x. IMPRESSION: y."}]))
+
+    class FakeCursor:
+        def __init__(self):
+            self.executed = []
+
+        def execute(self, sql, params=None):
+            self.executed.append(sql)
+
+        def fetchall(self):
+            return [(42,)]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    class FakeConn:
+        cursor_obj = FakeCursor()
+
+        def cursor(self):
+            return self.cursor_obj
+
+        def close(self):
+            pass
+
+    fake_pymysql = types.ModuleType("pymysql")
+    fake_conn = FakeConn()
+    fake_pymysql.connect = lambda **kw: fake_conn
+    monkeypatch.setitem(sys.modules, "pymysql", fake_pymysql)
+
+    class FakeClient:
+        cfg = types.SimpleNamespace(db_host="h", db_port=3306, db_user="u",
+                                    db_pass="p", db_name="d")
+        put = None
+
+        def order_for_accession(self, a):
+            return {"patient_uuid": "p", "order_uuid": "o"}
+
+        def find_seeded_report(self, p, o):
+            return "dr-1"
+
+        def _fget(self, path):
+            return {"status": "final", "conclusion": "the rehearsal's projected text"}
+
+        def _fput(self, res, rid, body):
+            self.put = (rid, body)
+            return body
+
+    c = FakeClient()
+    out = report_seeder.restage(c, "s1", str(manifest))
+    rid, body = c.put
+    assert rid == "dr-1"
+    assert body["status"] == "preliminary", "a restaged seed must accept the next sign (#102)"
+    assert body["conclusion"] == "FINDINGS: x. IMPRESSION: y."
+    assert out["voided_ris_reports"] == [42]
+    assert any("voided = 1" in sql for sql in fake_conn.cursor_obj.executed), \
+        "RIS rows are voided for audit, not deleted"

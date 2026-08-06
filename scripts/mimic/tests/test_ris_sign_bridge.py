@@ -110,12 +110,100 @@ def test_stuck_miss_relogs_on_the_nth_attempt(monkeypatch, capsys):
     assert "(attempt 1)" in out and f"(attempt {bridge.MISS_LOG_EVERY})" in out
 
 
-def test_already_final_report_is_done_without_a_put(monkeypatch):
+def test_our_own_previous_write_short_circuits_quietly(monkeypatch, capsys):
+    # The idempotence the final-skip exists for (#102 AC2): a final whose conclusion is
+    # byte-identical to what we would write is our own earlier flip -- done, no PUT, no log.
     c = _FakeClient(order={"patient_uuid": "p", "order_uuid": "o"}, fhir_id="dr-1",
-                    report={"status": "final"})
+                    report={"status": "final", "conclusion": "Pneumothorax."})
     bridged, missing = set(), {}
     _rows(monkeypatch, [ROW])
     bridge.bridge_cycle(None, c, bridged, missing)
+    assert 7 in bridged and not c.put_calls
+    assert capsys.readouterr().out == "", "our own write must not spam the log per cycle"
+
+
+# --- #102: a stale seeded final is never a silent drop ----------------------
+
+
+STALE = {"status": "final", "conclusion": "the 454-char seeded cohort narrative"}
+
+
+def test_stale_final_is_refused_loudly_with_both_lengths(monkeypatch, capsys):
+    # The live loss: report 42 / s50279568 -- seeded final from a rehearsal finalize, signed
+    # body only in the RIS, bridge log empty. Default behaviour is still "never overwrite a
+    # final", but now it says so, names the report, and gives both lengths.
+    c = _FakeClient(order={"patient_uuid": "p", "order_uuid": "o"}, fhir_id="dr-1",
+                    report=dict(STALE))
+    bridged, missing = set(), {}
+    _rows(monkeypatch, [ROW])
+    bridge.bridge_cycle(None, c, bridged, missing)
+    out = capsys.readouterr().out
+    assert not c.put_calls, "default must not overwrite a final report"
+    assert "REFUSING" in out and "s123" in out
+    assert f"{len(STALE['conclusion'])} chars stored" in out
+    assert f"{len('Pneumothorax.')} signed" in out
+    assert "restage" in out and "BRIDGE_OVERWRITE_STALE_FINAL" in out, \
+        "the line must name both remedies"
+    assert 7 not in bridged, \
+        "a refused stale final must keep retrying so a restage bridges without a restart"
+
+
+def test_stale_final_relogs_on_cadence_not_every_cycle(monkeypatch, capsys):
+    c = _FakeClient(order={"patient_uuid": "p", "order_uuid": "o"}, fhir_id="dr-1",
+                    report=dict(STALE))
+    bridged, missing = set(), {}
+    _rows(monkeypatch, [ROW])
+    for _ in range(bridge.MISS_LOG_EVERY + 1):
+        bridge.bridge_cycle(None, c, bridged, missing)
+    out = capsys.readouterr().out
+    assert out.count("REFUSING") == 2, "expected attempt 1 and attempt MISS_LOG_EVERY only"
+
+
+def test_stale_final_bridges_after_an_operator_restage(monkeypatch):
+    # report_seeder.py restage returns the seed to preliminary; the refused sign must then
+    # bridge on the very next cycle, no container restart (#102 AC4's other half).
+    c = _FakeClient(order={"patient_uuid": "p", "order_uuid": "o"}, fhir_id="dr-1",
+                    report=dict(STALE))
+    bridged, missing = set(), {}
+    _rows(monkeypatch, [ROW])
+    bridge.bridge_cycle(None, c, bridged, missing)
+    assert not c.put_calls
+    c.report = {"status": "preliminary"}
+    bridge.bridge_cycle(None, c, bridged, missing)
+    assert 7 in bridged and c.put_calls, "the restaged seed must accept the retried sign"
+    (_, body), = c.put_calls
+    assert body["conclusion"] == "Pneumothorax." and body["status"] == "final"
+
+
+def test_stale_final_is_projected_over_when_the_flag_says_so(monkeypatch, capsys):
+    monkeypatch.setattr(bridge, "OVERWRITE_STALE_FINAL", True)
+    c = _FakeClient(order={"patient_uuid": "p", "order_uuid": "o"}, fhir_id="dr-1",
+                    report=dict(STALE))
+    bridged, missing = set(), {}
+    _rows(monkeypatch, [ROW])
+    bridge.bridge_cycle(None, c, bridged, missing)
+    (_, body), = c.put_calls
+    assert body["conclusion"] == "Pneumothorax." and body["status"] == "final"
+    assert 7 in bridged
+    out = capsys.readouterr().out
+    assert "projecting the human sign over it" in out, "an overwrite must never be silent either"
+
+
+def test_our_own_truncated_write_still_reads_as_ours(monkeypatch):
+    # The comparison is "modulo strip_html and the #91 marker" by construction: what we compare
+    # against is the marker-prefixed clamp we would write today. Pin it so a marker change
+    # cannot silently reclassify every past truncated write as stale.
+    long_body = "HISTORY: dyspnea. " * 100 + "FINDINGS: " + "w" * 1500 + " IMPRESSION: large ptx."
+    from report_text import strip_html
+    stripped = strip_html(long_body)
+    clamped, cut = clamp_conclusion(stripped, reserve=len(bridge.TRUNCATION_MARKER))
+    assert cut is True
+    ours = bridge.TRUNCATION_MARKER + clamped
+    c = _FakeClient(order={"patient_uuid": "p", "order_uuid": "o"}, fhir_id="dr-1",
+                    report={"status": "final", "conclusion": ours})
+    bridged = set()
+    _rows(monkeypatch, [(7, long_body, "s123", "Jake", "Doctor", "prov-uuid-1")])
+    bridge.bridge_cycle(None, c, bridged, {})
     assert 7 in bridged and not c.put_calls
 
 
