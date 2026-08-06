@@ -202,13 +202,19 @@ def order_id_for_uuid(conn, order_uuid: str):
 def existing_report(conn, order_id: int):
     """The current radiology_report row for this order, or None.
 
-    Returns (report_id, report_status, report_body) so the caller can decide
-    whether to skip (radiologist has touched it), UPDATE (empty draft), or INSERT
-    (nothing yet).
+    Returns (report_id, report_status, report_body, creator, changed_by) so the caller can decide
+    whether to skip (radiologist has touched it), REFRESH (a draft we wrote ourselves, now stale),
+    UPDATE (empty draft), or INSERT (nothing yet).
+
+    `creator`/`changed_by` are what tell our own draft apart from a radiologist's edit. Without
+    them the bridge could only ask "is the body empty", so a draft it had written itself looked
+    identical to one a radiologist had typed into, and it backed off forever: 30 studies on the
+    demo host were still showing the pre-#103 deterministic template long after the LLM path
+    started producing real prose, and nothing would ever have refreshed them.
     """
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT report_id, report_status, report_body "
+            "SELECT report_id, report_status, report_body, creator, changed_by "
             "FROM radiology_report WHERE order_id=%s AND voided=0 "
             "ORDER BY report_id DESC LIMIT 1",
             (order_id,),
@@ -237,9 +243,11 @@ def insert_draft(conn, order_id: int, body: str, service_user_id: int) -> int:
 def update_draft_body(
     conn, report_id: int, body: str, service_user_id: int
 ) -> None:
-    """Fill in an empty DRAFT row's report_body. Never runs on a row with existing
-    text or a non-DRAFT status -- caller enforces that; this function is dumb on
-    purpose so an accidental call from the wrong branch cannot silently overwrite.
+    """Write a DRAFT row's report_body: either filling an empty one, or refreshing one this
+    bridge wrote earlier whose impression has since changed (#106). Never runs on a radiologist's
+    text or a non-DRAFT status -- the caller enforces that by checking creator/changed_by; this
+    function is dumb on purpose so an accidental call from the wrong branch cannot silently
+    overwrite.
 
     `changed_by=service_user_id` per !107 review -- the audit trail names the
     bridge for the update, not admin.
@@ -389,20 +397,30 @@ def bridge_report(conn, resource: dict, service_user_id: int) -> str:
         new_id = insert_draft(conn, order_id, conclusion, service_user_id)
         return f"{fhir_id}: insert -> report_id={new_id} order_id={order_id}"
 
-    report_id, status, body = current
+    report_id, status, body, creator, changed_by = current
     body_stripped = (body or "").strip()
 
-    # Radiologist has already touched it: hands off. Includes anything past DRAFT,
-    # or a DRAFT that already carries text (radiologist typed something even if
-    # they haven't hit Complete yet).
-    if status != "DRAFT" or body_stripped:
-        if body_stripped == conclusion:
-            return f"{fhir_id}: noop-same-text report_id={report_id}"
+    if body_stripped == conclusion:
+        return f"{fhir_id}: noop-same-text report_id={report_id}"
+
+    # Anything past DRAFT is signed or beyond: hands off, whatever wrote it.
+    if status != "DRAFT":
         return f"{fhir_id}: skip-touched report_id={report_id} status={status}"
 
-    # DRAFT with empty body: our first write. Fill it.
+    # A DRAFT that is OURS and that nobody else has edited is ours to refresh (#106). Deciding on
+    # the body alone treated our own earlier write as a radiologist's typing, so a draft went
+    # stale the moment the impression changed and stayed stale forever: the demo host sat on 30
+    # deterministic-template drafts long after the LLM path (#103) was producing real prose.
+    # `creator`/`changed_by` are stamped with the service user by insert_draft/update_draft_body,
+    # so ownership is already recorded -- it was simply never read.
+    ours = creator == service_user_id and changed_by in (None, service_user_id)
+    if body_stripped and not ours:
+        # A radiologist created this draft, or edited ours. Their text is never overwritten.
+        return f"{fhir_id}: skip-touched report_id={report_id} status={status}"
+
     update_draft_body(conn, report_id, conclusion, service_user_id)
-    return f"{fhir_id}: update report_id={report_id}"
+    verb = "refresh" if body_stripped else "update"
+    return f"{fhir_id}: {verb} report_id={report_id}"
 
 
 def main() -> None:
