@@ -15,7 +15,8 @@ origin the #75 Caddy overlay serves. Nothing else is reachable off-box.
 | Reading worklist | `https://demo.example.org/reading` | proxy login (`DEMO_PROXY_USER`) |
 | Viewer (reading mode) | `https://demo.example.org/read?...` — reached ONLY by clicking a worklist row | same origin, same login |
 | RIS / OpenMRS login | `https://demo.example.org/openmrs/login.htm` | radiologist's own OpenMRS account |
-| RIS order page (Claim Report) | `https://demo.example.org/openmrs/module/radiology/radiologyOrder.form?orderId=<uuid>` — reached via the viewer's **Report this study** action | OpenMRS session |
+| RIS order page (read-only) | `https://demo.example.org/openmrs/module/radiology/radiologyOrder.form?orderId=<uuid>` — reached via the viewer's **Report this study** action. Shows the order and any pre-sign draft. It carries **no claim button** on this build (#109), and its "View Study" link points at a `localhost:8081` Weasis URL that is dead from any reviewer's browser: ignore it, the viewer is the `/read` route | OpenMRS session |
+| RIS report form (claim, author, sign) | `https://demo.example.org/openmrs/module/radiology/radiologyReport.form?orderId=<uuid>` — **opening this URL is the claim**: it creates the draft and redirects to `?reportId=<n>` | OpenMRS session |
 | Patient chart (referring MD) | `https://demo.example.org/openmrs` → find patient → chart shows the **AI critical result notification** entry | physician's own OpenMRS account |
 | Critical-result ack (phone) | `https://demo.example.org/reading-api/ack/<taskId>?sig=…` — the signed link inside the chart notification | physician's OpenMRS account (live session if the link sits under `/openmrs`, else an HTTP Basic prompt) |
 | Sign-off override (phone) | `https://demo.example.org/ingress/signoff/<workflowId>/override` — the link inside the escalation page | `SIGNOFF_OVERRIDE_TOKEN` |
@@ -72,8 +73,12 @@ origin the #75 Caddy overlay serves. Nothing else is reachable off-box.
    PA + lateral hang side by side automatically, right panel open, findings banner shows no
    COMPLETE finding.
 4. **Report this study** (right panel / toolbar). Expected: popup lands on
-   `/openmrs/module/radiology/radiologyOrder.form?orderId=<uuid>` with **Claim Report** present.
-   Claim, author a normal report (FINDINGS + IMPRESSION sections), sign as the radiologist.
+   `/openmrs/module/radiology/radiologyOrder.form?orderId=<uuid>`, which shows the order.
+   **There is no Claim Report button on this build (#109).** Claim by changing `radiologyOrder`
+   to `radiologyReport` in that URL, keeping the same `orderId`: that creates the draft and
+   redirects to `?reportId=<n>`. Author a normal report (FINDINGS + IMPRESSION sections), set
+   **Results Interpreter** to yourself, then **Complete**, which is the sign. Expected: the page
+   returns with "Report completed" and status **Completed**.
 5. **Narrate the silence:** poller joins the final DiagnosticReport within one cycle,
    verification runs post-sign and PASSes, **no page goes out** — the alert-fatigue point.
 6. **Jaeger** (`http://localhost:16686` over the tunnel): pick the study's trace, show the
@@ -90,7 +95,9 @@ origin the #75 Caddy overlay serves. Nothing else is reachable off-box.
 3. **Worklist row click →** `/read?...`: PA + lateral hang, right panel already open, banner
    reads "Pneumothorax screening signal (not a read): positive at p=…" with zero clicks; show
    the CAD evidence overlay.
-4. **Report this study → Claim Report** → author (accept or edit the draft impression) → **sign**.
+4. **Report this study →** switch `radiologyOrder.form` to `radiologyReport.form` in the URL,
+   which is the claim on this build (#109, and arc 1 step 4) → author, accepting or editing the
+   draft impression → set **Results Interpreter** → **Complete**, which is the sign.
 5. **The page goes out.** Chart of the ordering patient (`/openmrs`, logged in as the referring
    physician): the **AI critical result notification** entry is on the chart — finding label +
    accession + the signed ack link, never the narrative.

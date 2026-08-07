@@ -2,9 +2,23 @@
  * ReportActionsPanel — right-side viewer panel offering actions on the study
  * the radiologist is currently reading.
  *
- * Today: one action — "Report this study" — opens the RIS order page (which
- * carries the Claim Report action into radiologyReport.form) in a new tab, so
- * the radiologist lands directly on the order they were reading. #73 item 2.
+ * Today: one action — "Report this study" — opens the RIS order page in a new
+ * tab, so the radiologist lands directly on the order they were reading.
+ * #73 item 2.
+ *
+ * CORRECTION (#109, measured on the deployed o3 pin o3-010548c5, 2026-08-07):
+ * this comment used to say the order page "carries the Claim Report action into
+ * radiologyReport.form". It does not. That page renders no claim affordance at
+ * all — confirmed in the DOM, with an account holding `Add Radiology Reports`,
+ * so it is not a privilege gap. The claim is implicit in navigating to
+ * `radiologyReport.form?orderId=<uuid>`, which creates the draft and redirects
+ * to `?reportId=<n>`. The run-book's step says so explicitly.
+ *
+ * The target below is deliberately NOT repointed at radiologyReport.form: that
+ * navigation has a side effect (it claims), so a radiologist clicking through
+ * merely to look would silently take the report. Whether the panel should offer
+ * a second, explicitly-labelled claim action is a workflow call for this
+ * extension's owner, tracked on #109.
  *
  * URL, live-verified against the running o3 stack (2026-07-22): report
  * authoring hangs off the order page,

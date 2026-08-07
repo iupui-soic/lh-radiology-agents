@@ -19,8 +19,13 @@ forever at `AWAITING_RADIOLOGIST`.
 
 ## Field mapping (RIS -> fhir2 -> pipeline consumer)
 
-Producer: `RadiologyReportServiceImpl.emitFhirDiagnosticReport` (sibling `lh-radiology`, o3), fired
-when a report is signed (`saveRadiologyReport` sets status COMPLETED).
+Intended producer: `RadiologyReportServiceImpl.emitFhirDiagnosticReport` (sibling `lh-radiology`,
+o3), fired when a report is signed (`saveRadiologyReport` sets status COMPLETED). **On the deployed
+stack that emit never runs** (#82: `ServiceNotFoundException` on `FhirDiagnosticReportService`), so
+the real producer today is `scripts/mimic/ris_sign_bridge.py`, which polls the RIS
+`radiology_report` table for COMPLETED rows and projects each one into that study's seeded
+DiagnosticReport. The table below is the intended mapping; the section after it records where the
+bridge's output differs, measured on the demo host.
 
 | RIS `RadiologyReport` field | fhir2 `DiagnosticReport` field | pipeline consumer |
 |---|---|---|
@@ -31,6 +36,24 @@ when a report is signed (`saveRadiologyReport` sets status COMPLETED).
 | report `date` | `issued` | poller `signedAt` |
 | **the order** | **`basedOn = ServiceRequest/<order uuid>`** | **poller `serviceRequestRef` join** |
 | (n/a) | `identifier` (ACSN) | poller `accessionNumber` join |
+
+## What the deployed stack actually produces (demo host, 2026-08-07)
+
+Measured on a real human sign: study s56373033, signed in the RIS by Radiologist One, bridged four
+seconds later. Three fields do not match the table above, so write consumers against this section
+rather than against the intended mapping.
+
+| field | intended | what actually lands | consequence |
+|---|---|---|---|
+| `status` | `final` | as intended | the gate releases |
+| `basedOn` | `ServiceRequest/<order uuid>` | as intended | the join works, and it is the only key that does |
+| `conclusion` | the report body | the body **wrapped by the RIS editor**, e.g. `'<p>FINDINGS: ... IMPRESSION: ...</p>'` | verification still parses it, but a chart view or a whole-narrative comparison gets literal markup |
+| `issued` | the report date, read as poller `signedAt` | **unchanged from the seed**: `2026-07-24` on a report signed `2026-08-07` | the bridge flips an existing seeded report and never restamps `issued`, so any turnaround or time-in-state metric reads the seed date |
+| `performer` | the signer as `Practitioner/<provider uuid>` (#93) | **dropped**, reads back as absent | fhir2 accepts and silently discards `performer` and `resultsInterpreter`, the same accepts-and-drops family as the `identifier` case above. The RIS stays the attribution record and the fhir2 copy names no radiologist |
+
+The `issued` and `performer` gaps belong to the bridge-as-producer path, so repairing the module's
+own emit closes both. The `conclusion` markup comes from the RIS editor and would survive that
+repair.
 
 ## What was broken (verified live against fhir2 4.1.0, o3 stack, 2026-07-15)
 
@@ -85,7 +108,26 @@ NOTE on scope: the RIS has no REST create for orders or reports (`newDelegate` t
 is signed through the legacy UI / the module Java service, never headless. Step 4 therefore injects
 the byte-faithful report the rebuilt `emitFhirDiagnosticReport` produces (shape independently
 confirmed to round-trip on this fhir2) in place of a human RIS sign. Acceptance criterion 1 (a human
-sign in the RIS releasing the gate) remains a UI step for a rehearsal.
+sign in the RIS releasing the gate) was closed separately, by the hosted run below.
+
+## Verified with a human sign on the demo host (2026-08-07)
+
+No seeder and no synthetic write anywhere in the chain. Driven through the browser as
+`radiologist1` on the TLS overlay:
+
+1. Opened `radiologyReport.form?orderId=5b386e42-8705-11f1-9cc6-ceaf1c67aa2e` for study
+   s56373033, which claimed the report and created draft 48. There is no Claim Report button on
+   the order page in this build (#109); the claim is implicit in that navigation.
+2. Authored the body, set Results Interpreter to Radiologist One, clicked **Complete**, and the
+   RIS showed "Report completed".
+3. `19:11:38Z` the bridge: `bridged RIS report 48 (s56373033, signed by Radiologist One) ->
+   DiagnosticReport/7fecd3eb-... final`.
+4. `19:11:40Z` to `19:11:42Z` the poller joined on `basedOn` and the post-sign pipeline ran:
+   verification **PASS** with no issues, comms dispatched `ehr-inbox SENT`, workflow **ARCHIVED**.
+
+About four seconds from Complete to ARCHIVED. The study was restaged afterwards, so the cohort is
+unchanged. One transient `401` hit the bridge's `radiologyorder` REST call on the cycle before it
+succeeded, and it recovered on the next 10s cycle without operator action.
 
 ## Showcase corollary (#68)
 
