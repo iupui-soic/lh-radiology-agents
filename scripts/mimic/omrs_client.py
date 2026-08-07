@@ -119,6 +119,10 @@ class OmrsClient:
     def _rget(self, res, params=None):
         r = self._http.get(f"{self.cfg.rest_base}/{res}", params=params); r.raise_for_status(); return r.json()
 
+    def _rdelete(self, res):
+        """OpenMRS REST DELETE is a soft void, not a purge."""
+        r = self._http.delete(f"{self.cfg.rest_base}/{res}"); r.raise_for_status()
+
     def _db(self):
         if self._conn is None:
             import pymysql
@@ -232,10 +236,20 @@ class OmrsClient:
         return self._rpost("patient", body)["uuid"]
 
     def find_patient_by_subject_id(self, subject_id: str) -> Optional[str]:
+        """The REST q-search rides the Lucene index, and that index does not survive an openmrs
+        container recreate: live-observed 2026-08-07, every q-search (name or identifier) answered
+        empty while all 59 cohort patients sat in the DB, which would make a re-run DUPLICATE the
+        whole cohort. fhir2's identifier search is Hibernate-criteria-based and immune, so it is
+        the fallback that keeps get-or-create honest under a stale index."""
         res = self._rget("patient", {"q": str(subject_id), "v": "custom:(uuid,identifiers:(identifier))"})
         for p in res.get("results", []):
             if any(i.get("identifier") == str(subject_id) for i in p.get("identifiers", [])):
                 return p["uuid"]
+        bundle = self._fget("Patient", {"identifier": str(subject_id)})
+        for e in bundle.get("entry", []) or []:
+            r = e.get("resource") or {}
+            if any(i.get("value") == str(subject_id) for i in r.get("identifier", []) or []):
+                return r.get("id")
         return None
 
     def create_encounter(self, patient_uuid: str, when_iso: str) -> str:
@@ -364,18 +378,20 @@ class OmrsClient:
                     (cid, name, dictionary._u(concept_uuid + ".name.en")))
         return cid
 
-    def ensure_order_reason(self, codes: list[str], display: str = "") -> str:
-        """Get-or-create the ICD-10-mapped order-reason Concept for this code set (#68 gap 4).
+    def ensure_diagnosis_concept(self, codes: list[str], display: str = "",
+                                 fallback_prefix: str = "Diagnosis ") -> str:
+        """Get-or-create the ICD-10-mapped Diagnosis-class Concept for this code set.
 
         One Diagnosis-class Concept carries one SAME-AS reference-term mapping per code, because
         the #81 resolver returns ALL of a reason Concept's ICD-10 codes (deduped, in mapping
         order). Stable UUID5 on the sorted code set, so re-runs and reordered manifests reuse the
-        same concept. Returns the concept uuid for insert_radiology_order."""
+        same concept -- and an order reason and a problem-list entry for the same code share one
+        Concept instead of minting two. Returns the concept uuid."""
         codes = [c.strip() for c in codes if c and c.strip()]
         if not codes:
-            raise ValueError("ensure_order_reason needs at least one ICD-10 code")
+            raise ValueError("ensure_diagnosis_concept needs at least one ICD-10 code")
         concept_uuid = dictionary.reason_concept_uuid(codes)
-        name = display or "Radiology order reason " + "+".join(sorted(codes))
+        name = display or fallback_prefix + "+".join(sorted(codes))
         db = self._db()
         with db.cursor() as cur:
             cid = self._provision_concept(cur, concept_uuid, name, dictionary.DIAGNOSIS_CLASS)
@@ -402,6 +418,12 @@ class OmrsClient:
                                 (term_id, map_type_id, cid,
                                  dictionary._u(concept_uuid + ".map." + code)))
         return concept_uuid
+
+    def ensure_order_reason(self, codes: list[str], display: str = "") -> str:
+        """Order-reason face of ensure_diagnosis_concept (#68 gap 4). Same Concept family and the
+        same stable uuid per code set; only the no-display fallback name differs, kept verbatim so
+        already-provisioned reason concepts keep their names on re-runs."""
+        return self.ensure_diagnosis_concept(codes, display, fallback_prefix="Radiology order reason ")
 
     def ensure_drug(self, name: str) -> str:
         """Get-or-create the Drug (a Drug-class Concept + a `drug` row) for a manifest med
@@ -515,14 +537,26 @@ class OmrsClient:
         return self._fpost("Observation", body)["id"]
 
     def create_condition(self, patient_uuid: str, concept_uuid: str, onset_iso: str) -> str:
-        """OpenMRS REST /condition (fhir2 Condition create 500s here). The problem is a coded
-        Concept; onset stamps it. NOTE: the coded-concept shape varies by OpenMRS build -- verify
-        against the provisioned dictionary when loading real MIMIC-IV diagnoses_icd (#68)."""
+        """OpenMRS REST /condition (fhir2 Condition create 500s here). `concept_uuid` must be a
+        provisioned Concept uuid (ensure_diagnosis_concept), NOT a raw ICD code: this build's REST
+        converter answers 201 for an unresolvable coded value and persists the row with every
+        content column NULL, which is how the whole cohort's problem list went blank (#87). So the
+        write is read back, and a code-less result voids the empty row and raises so the caller
+        counts a warning instead of a loaded problem."""
         body = {"patient": patient_uuid,
                 "condition": {"coded": concept_uuid},
                 "clinicalStatus": "ACTIVE",
                 "onsetDate": onset_iso}
-        return self._rpost("condition", body)["uuid"]
+        uuid = self._rpost("condition", body)["uuid"]
+        stored = self._rget(f"condition/{uuid}", {"v": "full"})
+        if not (stored.get("condition") or {}).get("coded"):
+            try:
+                self._rdelete(f"condition/{uuid}")
+            except Exception:  # noqa: BLE001 -- the void is best-effort; the raise below is the point
+                pass
+            raise RuntimeError(f"condition {uuid} persisted without coded concept {concept_uuid}; "
+                               "the REST converter dropped it (#87)")
+        return uuid
 
     def seed_diagnostic_report(self, patient_uuid: str, service_request_uuid: str,
                                concept_uuid: str, conclusion: str, status: str = "preliminary") -> str:

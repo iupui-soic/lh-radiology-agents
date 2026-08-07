@@ -67,6 +67,9 @@ class _FakeClient:
     def ensure_order_reason(self, codes, display=""):
         self.calls.append(("reason", tuple(codes), display)); return "reason-" + "+".join(codes)
 
+    def ensure_diagnosis_concept(self, codes, display="", fallback_prefix="Diagnosis "):
+        self.calls.append(("diag-concept", tuple(codes), display)); return "diag-" + "+".join(codes)
+
     def ensure_drug(self, name):
         self.calls.append(("drug", name)); return f"drug-{name}"
 
@@ -112,6 +115,34 @@ def test_load_study_ehr_is_best_effort():
     # the study still loads (order + report) despite the EHR failure
     assert r["order"] == "ord-s90000002" and r["report"] == "rep-x"
     assert any("problem" in w for w in r.get("warnings", []))
+
+
+def test_problem_loads_as_provisioned_concept_not_raw_icd_code():
+    # #87: the raw ICD code went straight to /condition and persisted as an all-NULL row.
+    # The fix provisions the ICD-10-mapped Concept and passes ITS uuid to create_condition.
+    import load_cohort
+    studies = {x.study_id: x for x in M.load_manifest(SAMPLE)}
+    c = _FakeClient()
+    r = load_cohort.load_study(c, studies["s90000002"], concept_uuid="concept-uuid")
+    assert r["ehr"]["problems"] == 1
+    assert ("diag-concept", ("J95.811",), "Postprocedural pneumothorax") in c.calls
+    assert ("cond", "diag-J95.811") in c.calls
+    assert not any(call == ("cond", "J95.811") for call in c.calls)  # never the raw code
+
+
+def test_problem_concept_failure_degrades_to_warning():
+    import load_cohort
+
+    class _BadDiag(_FakeClient):
+        def ensure_diagnosis_concept(self, *a, **k):
+            raise RuntimeError("no ICD-10 source")
+
+    studies = {x.study_id: x for x in M.load_manifest(SAMPLE)}
+    c = _BadDiag()
+    r = load_cohort.load_study(c, studies["s90000002"], concept_uuid="concept-uuid")
+    assert r["order"] == "ord-s90000002" and r["report"] == "rep-x"
+    assert r["ehr"]["problems"] == 0
+    assert any("problem J95.811" in w for w in r.get("warnings", []))
 
 
 def test_order_reason_reaches_the_order_with_problem_display():
