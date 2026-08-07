@@ -57,13 +57,32 @@ def _note_miss(missing: dict[int, int], report_id: int, what: str) -> None:
         print(f"report {report_id}: {what}; retrying (attempt {n})", flush=True)
 
 
+def _fhir_instant(dt) -> str | None:
+    """A naive OpenMRS datetime -> a FHIR instant, or None if there is nothing to stamp.
+
+    The module's datetimes carry no timezone and OpenMRS stores them in the server's zone, which
+    is UTC on every stack we run (checked against the #70 sign: date_created 19:09 matched the
+    19:09Z the bridge and the orchestrator both logged). Treating them as UTC is therefore exact
+    here and off by the server offset nowhere we deploy. A deployment that runs OpenMRS on a
+    non-UTC server would need this to read that offset instead of assuming it.
+    """
+    if dt is None:
+        return None
+    return dt.strftime("%Y-%m-%dT%H:%M:%S.000+00:00")
+
+
 def completed_reports(conn):
     # p.uuid rides along so the bridged DiagnosticReport can carry the signer as a
     # Practitioner reference (#93): fhir2 maps Practitioner ids to provider uuids.
+    #
+    # The sign instant (#110) is coalesce(date_changed, date_created), NOT report_date: the
+    # module's report_date is a DATE, so it carries the day and drops the time, and a
+    # day-precision issued cannot serve the time-in-state metrics that read it. A report is
+    # completed once and not edited after, so its last write IS the completion.
     with conn.cursor() as cur:
         cur.execute(
             "select rr.report_id, rr.report_body, o.accession_number, pn.given_name, "
-            "pn.family_name, p.uuid "
+            "pn.family_name, p.uuid, coalesce(rr.date_changed, rr.date_created) "
             "from radiology_report rr "
             "join orders o on o.order_id = rr.order_id "
             "left join provider p on p.provider_id = rr.principal_results_interpreter "
@@ -94,7 +113,7 @@ def bridge_cycle(conn, c, bridged: set[int], missing: dict[int, int]) -> None:
     loading, fhir2 hiccup, order arriving late), a stale final clears on an operator restage,
     and a permanent skip turns either into a silently lost human sign until a container
     restart (#90, #102)."""
-    for report_id, body, accession, given, family, provider_uuid in completed_reports(conn):
+    for report_id, body, accession, given, family, provider_uuid, signed_at in completed_reports(conn):
         if report_id in bridged:
             continue
         order = c.order_for_accession(accession)
@@ -145,6 +164,17 @@ def bridge_cycle(conn, c, bridged: set[int], missing: dict[int, int]) -> None:
                   flush=True)
         r["conclusion"] = conclusion
         r["status"] = "final"
+        # Restamp the sign instant (#110). The flip reuses the study's SEEDED DiagnosticReport, so
+        # without this `issued` keeps the ETL seed's timestamp: the #70 hosted run produced a
+        # report signed 2026-08-07 carrying issued 2026-07-24. docs/signoff-link.md maps
+        # issued -> the poller's signedAt, so every time-in-state and turnaround number computed
+        # off a rehearsal (#76) would be wrong by the age of the cohort load, and wrong in the
+        # flattering direction. Unlike performer and identifier, `issued` genuinely round-trips on
+        # this fhir2 (PUT echo AND readback, probed live 2026-08-07), so this is ours to fix.
+        # A row with no timestamp at all leaves the seed value rather than inventing one.
+        issued = _fhir_instant(signed_at)
+        if issued:
+            r["issued"] = issued
         # Stamp the signer as performer (#93): a UI sign attributes the report, so the bridged
         # equivalent must too, or the final chart copy carries no radiologist. Practitioner id =
         # the interpreter's provider uuid in fhir2. A COMPLETED report without an interpreter
