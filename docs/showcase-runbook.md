@@ -39,6 +39,18 @@ origin the #75 Caddy overlay serves. Nothing else is reachable off-box.
    2 step 6 for why, and what to change if you want the one-click path.
 4. Accounts: each radiologist has their own OpenMRS user; the referring-physician demo account
    password is known; the ack/override phone is on wifi that can reach the demo origin.
+4a. Referring-physician access (#85) is bootstrapped, not hand-built: the
+   `referring-role-bootstrap` one-shot (runs on every `up`) fills the module's zero-privilege
+   `Radiology: Referring physician` role with the proven read-only set. The `dr.reyes` /
+   `dr.okafor` / `dr.novak` logins (password: `MIMIC_REFERRER_PASSWORD`) come from the cohort
+   ETL at load time; `BOOTSTRAP_DEMO_REFERRERS=1` makes the bootstrap provision and converge
+   them too, but that half needs user-admin-capable creds on the bootstrap service (the host's
+   least-privilege service account 403s; see the compose comment). Entry path for these logins
+   is a `patientDashboard.form?patientId=<id>` DEEP LINK (the notification link in arc 2 is
+   one): the legacy home page 500s for them (upstream errorhandler.jsp serialization bug), while
+   the patient dashboard, its Radiology tab included, renders fine. Do not "fix" a referrer
+   login by granting admin; re-run the bootstrap instead and check its log line
+   (`role 'Radiology: Referring physician': N granted, ...`).
 5. OpenMRS seed captured once (`scripts/dump_openmrs_seed.sh`) so recovery never costs the
    16-minute boot.
 5a. Radiology-module vendor assets fetched once per host (`docker/caddy/fetch-radiology-vendor.sh`,
@@ -130,6 +142,12 @@ and only a positive screen ever becomes a COMPLETE finding. Full detail: `docs/c
   flip-to-final rehearsal path; delete probe artifacts per the worked examples in the drills.
 - Full reset (between sessions only): selective `docker volume rm <project>_mariadb-data` +
   seed reload; ledger and ingress volumes untouched.
+- **After any `openmrs` container recreate, rebuild the Lucene search index** or every
+  name/identifier search in the RIS (find patient, find provider) silently returns nothing,
+  and an ETL re-run would duplicate the cohort (the REST q-search rides the same index).
+  Live-hit 2026-08-07. Fix: `DELETE FROM global_property WHERE property='search.indexVersion';`
+  then restart the container; core rebuilds the index at boot (~1 min warm) and re-stamps the
+  property. Verify: `patient?q=<subject_id>` returns the patient.
 
 ## 6a. Deploy window: updating the app services (#98)
 

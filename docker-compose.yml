@@ -137,6 +137,42 @@ services:
       - "pip install --quiet --no-cache-dir pymysql==1.1.0 && python /opt/bootstrap.py"
     restart: "no"
 
+  # Referring-physician access (#85): fills the radiology module's zero-privilege
+  # "Radiology: Referring physician" role with the proven read-only set, and (flag) provisions
+  # the showcase referrer logins through the ETL's own get-or-create path. Same one-shot idiom
+  # as presign-concept-bootstrap; idempotent on every `up`.
+  referring-role-bootstrap:
+    image: python:3.11-slim@sha256:baf89808ec37adeaab83cec287adb4a2afa4a11c1d51e961c7ec737877e61af6   # pinned (#72)
+    depends_on:
+      openmrs:
+        condition: service_healthy
+      mariadb:
+        condition: service_healthy
+    environment:
+      OMRS_DB_HOSTNAME: mariadb
+      OMRS_DB_NAME: openmrs
+      OMRS_DB_USERNAME: openmrs
+      OMRS_DB_PASSWORD: openmrs
+      # Off by default: the role grant always runs; the showcase referrer ACCOUNTS are demo
+      # furniture, created only when a deployment opts in. The account half runs over OpenMRS
+      # REST, so it needs creds that can read and create users: the dev default (admin) can,
+      # a least-privilege host service account cannot (403s, live-verified 2026-08-07). On such
+      # hosts either leave the flag off (the cohort ETL provisions the accounts at load time)
+      # or point THIS service's FHIR2_BASIC_* at an admin-capable account for the one-shot.
+      BOOTSTRAP_DEMO_REFERRERS: ${BOOTSTRAP_DEMO_REFERRERS:-}
+      MIMIC_REFERRER_PASSWORD: ${MIMIC_REFERRER_PASSWORD:-Referring1!}
+      FHIR2_BASE_URL: http://openmrs:8080/openmrs/ws/fhir2/R4
+      FHIR2_BASIC_USER: ${FHIR2_BASIC_USER:-admin}
+      FHIR2_BASIC_PASS: ${FHIR2_BASIC_PASS:-Admin123}
+    volumes:
+      - ./docker/openmrs/bootstrap_referring_role.py:/opt/bootstrap_referring_role.py:ro
+      - ./scripts/mimic:/opt/mimic:ro
+    command:
+      - sh
+      - -c
+      - "pip install --quiet --no-cache-dir pymysql==1.1.0 'httpx>=0.27,<0.28' && python /opt/bootstrap_referring_role.py"
+    restart: "no"
+
   # --- PACS ---------------------------------------------------------------------
   # SQLite-backed Orthanc with DICOMweb enabled for OHIF, and the OnStableStudy
   # Python plugin wired at /etc/orthanc/orthanc_stable_study.py. The orthancteam
