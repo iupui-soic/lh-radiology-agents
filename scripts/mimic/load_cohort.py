@@ -84,7 +84,13 @@ def load_study(c: OmrsClient, s: CohortStudy, concept_uuid: str, when_iso: str =
             summary.setdefault("warnings", []).append(f"lab {lab.code}: {e}")
     for prob in s.problems:
         try:
-            c.create_condition(patient, prob.code, when_iso)
+            if not prob.code:
+                raise ValueError("problem with no ICD-10 code")
+            # A raw ICD code is NOT a concept uuid: passing it straight to /condition is what
+            # blanked the whole cohort's problem list (#87). Provision the ICD-10-mapped Concept
+            # first (same family as the order reason above; one code, one shared Concept).
+            concept = c.ensure_diagnosis_concept([prob.code], prob.display)
+            c.create_condition(patient, concept, when_iso)
             summary["ehr"]["problems"] += 1
         except Exception as e:  # noqa: BLE001
             summary.setdefault("warnings", []).append(f"problem {prob.code}: {e}")
