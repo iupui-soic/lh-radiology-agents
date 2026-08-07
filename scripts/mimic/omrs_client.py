@@ -236,10 +236,20 @@ class OmrsClient:
         return self._rpost("patient", body)["uuid"]
 
     def find_patient_by_subject_id(self, subject_id: str) -> Optional[str]:
+        """The REST q-search rides the Lucene index, and that index does not survive an openmrs
+        container recreate: live-observed 2026-08-07, every q-search (name or identifier) answered
+        empty while all 59 cohort patients sat in the DB, which would make a re-run DUPLICATE the
+        whole cohort. fhir2's identifier search is Hibernate-criteria-based and immune, so it is
+        the fallback that keeps get-or-create honest under a stale index."""
         res = self._rget("patient", {"q": str(subject_id), "v": "custom:(uuid,identifiers:(identifier))"})
         for p in res.get("results", []):
             if any(i.get("identifier") == str(subject_id) for i in p.get("identifiers", [])):
                 return p["uuid"]
+        bundle = self._fget("Patient", {"identifier": str(subject_id)})
+        for e in bundle.get("entry", []) or []:
+            r = e.get("resource") or {}
+            if any(i.get("value") == str(subject_id) for i in r.get("identifier", []) or []):
+                return r.get("id")
         return None
 
     def create_encounter(self, patient_uuid: str, when_iso: str) -> str:
