@@ -136,3 +136,54 @@ def test_restage_returns_the_seed_to_preliminary_so_a_new_sign_can_bridge(monkey
     assert out["voided_ris_reports"] == [42]
     assert any("voided = 1" in sql for sql in fake_conn.cursor_obj.executed), \
         "RIS rows are voided for audit, not deleted"
+
+
+# --- #108: a restage must return the study to the UNREAD worklist ------------
+
+class _FakeHttpx:
+    """Records the calls report_seeder makes to worklist-api."""
+
+    def __init__(self, rows=None, fail=False):
+        self.rows = rows if rows is not None else []
+        self.fail = fail
+        self.deleted = []
+
+    def get(self, url, timeout=None):
+        if self.fail:
+            raise RuntimeError("worklist-api unreachable")
+        return type("R", (), {"json": lambda _self: {"items": self.rows}})()
+
+    def delete(self, url, timeout=None):
+        self.deleted.append(url)
+        return type("R", (), {"status_code": 204})()
+
+
+def _with_httpx(monkeypatch, fake):
+    import sys as _sys
+    monkeypatch.setitem(_sys.modules, "httpx", fake)
+
+
+def test_restage_clears_the_worklist_read_state(monkeypatch):
+    """Without this the row would read Read for the whole of the next rehearsal, which is the
+    stale-worklist problem #108 exists to remove, reintroduced through the reset path."""
+    fake = _FakeHttpx(rows=[{"accessionNumber": "s123", "studyInstanceUID": "1.2.3"},
+                            {"accessionNumber": "other", "studyInstanceUID": "9.9.9"}])
+    _with_httpx(monkeypatch, fake)
+    assert report_seeder._clear_worklist_read_state("s123") is True
+    assert fake.deleted == ["http://worklist-api:8107/state/1.2.3"], \
+        "must clear the state of the restaged study, keyed on ITS study uid"
+
+
+def test_restage_survives_an_unreachable_worklist_api(monkeypatch, capsys):
+    """A reset tool must not die on a visibility call: the study is still restaged."""
+    _with_httpx(monkeypatch, _FakeHttpx(fail=True))
+    assert report_seeder._clear_worklist_read_state("s123") is False
+    assert "could not clear the worklist read-state" in capsys.readouterr().out
+
+
+def test_restage_says_so_when_the_study_has_no_worklist_row(monkeypatch, capsys):
+    fake = _FakeHttpx(rows=[{"accessionNumber": "other", "studyInstanceUID": "9.9.9"}])
+    _with_httpx(monkeypatch, fake)
+    assert report_seeder._clear_worklist_read_state("s123") is False
+    assert fake.deleted == [], "no row means nothing to clear, not a blind delete"
+    assert "no worklist row" in capsys.readouterr().out

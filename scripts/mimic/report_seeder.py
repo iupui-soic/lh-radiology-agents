@@ -85,8 +85,43 @@ def restage(c: OmrsClient, accession: str, manifest_path: str) -> dict:
     res["status"] = "preliminary"
     c._fput("DiagnosticReport", report_id, res)
 
+    cleared = _clear_worklist_read_state(accession)
+
     return {"accession": accession, "report_id": report_id, "voided_ris_reports": voided,
-            "restored_chars": len(seedable), "source_chars": len(source), "clamped": clamped}
+            "restored_chars": len(seedable), "source_chars": len(source), "clamped": clamped,
+            "read_state_cleared": cleared}
+
+
+def _clear_worklist_read_state(accession: str) -> bool:
+    """Return the study to the UNREAD worklist (#108). Best-effort; never fails a restage.
+
+    Since #108 the worklist marks a study Read from the orchestrator's terminal-state publish, and
+    that record outlives a restage: the re-fired workflow only republishes when it archives AGAIN,
+    so without this the row would read Read for the whole of the next rehearsal. That is exactly
+    the stale-worklist problem #108 set out to remove, so leaving it would reintroduce the bug via
+    the reset path.
+
+    The store is keyed on StudyInstanceUID and the seeder only holds an accession, so the mapping
+    comes from the worklist's own listing, which carries both. Deliberately not from Orthanc: this
+    tool has no Orthanc credentials, and the service that owns the record is the right place to
+    ask. A worklist-api that is down, or one predating the endpoint, costs the operator nothing:
+    the study is still restaged, its row just stays marked until the next archive.
+    """
+    import os
+
+    base = os.environ.get("WORKLIST_API_URL", "http://worklist-api:8107").rstrip("/")
+    try:
+        import httpx
+        rows = httpx.get(f"{base}/worklist", timeout=10.0).json().get("items", [])
+        uid = next((r.get("studyInstanceUID") for r in rows
+                    if r.get("accessionNumber") == accession), None)
+        if not uid:
+            print(f"warning: {accession} has no worklist row; read-state left as is", flush=True)
+            return False
+        return 200 <= httpx.delete(f"{base}/state/{uid}", timeout=5.0).status_code < 300
+    except Exception as e:  # noqa: BLE001 -- a reset tool must not die on a visibility call
+        print(f"warning: could not clear the worklist read-state for {accession}: {e}", flush=True)
+        return False
 
 
 def main(argv=None) -> int:
