@@ -48,6 +48,7 @@ from orchestrator.activities import (  # noqa: E402
     call_agent_skill_activity,
     publish_findings_activity,
     publish_priority_activity,
+    publish_state_activity,
     escalate_activity,
     load_escalation_policy_activity,
 )
@@ -145,7 +146,7 @@ def test_orchestrator_end_to_end_on_temporal(mock_agent_fleet):
             async with Worker(
                 env.client, task_queue=TASK_QUEUE, workflows=[StudyWorkflow],
                 activities=[call_agent_skill_activity, publish_priority_activity, publish_findings_activity,
-                            escalate_activity, load_escalation_policy_activity],
+                            publish_state_activity, escalate_activity, load_escalation_policy_activity],
             ):
                 handle = await env.client.start_workflow(
                     StudyWorkflow.run, STUDY_CONTEXT, id="wf-e2e-9", task_queue=TASK_QUEUE,

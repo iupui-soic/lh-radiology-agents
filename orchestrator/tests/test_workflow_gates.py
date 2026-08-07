@@ -53,6 +53,7 @@ def _reset(verify_plan: list[tuple[str, bool]]) -> None:
     _STATE["verify_plan"] = list(verify_plan)   # per-call (verificationStatus, requiresHumanReview)
     _STATE["verify_i"] = 0
     _STATE["escalations"] = []
+    _STATE["read_states"] = []          # #108 terminal publishes seen this scenario
 
 
 @activity.defn(name="call_agent_skill_activity")
@@ -80,6 +81,19 @@ async def mock_publish_findings(workflow_id: str, study_instance_uid: str, ai_re
     return None
 
 
+@activity.defn(name="publish_state_activity")
+async def mock_publish_state(
+    workflow_id: str, study_instance_uid: str, read_state: str, changed_at: str,
+) -> None:
+    """Mock for #108 publish_state_activity -- never-raises like the production version.
+
+    Records rather than no-ops: the whole point of #108 is that the worklist LEARNS the read
+    finished, so a test that only proves the workflow archived would pass just as happily with
+    the publish deleted."""
+    _STATE["read_states"].append((workflow_id, study_instance_uid, read_state, changed_at))
+    return None
+
+
 @activity.defn(name="escalate_activity")
 async def mock_escalate(workflow_id: str, reason: str, escalation: dict | None = None) -> None:
     _STATE["escalations"].append((workflow_id, reason, escalation))
@@ -103,7 +117,8 @@ def _worker(env: WorkflowEnvironment) -> Worker:
         env.client,
         task_queue=TASK_QUEUE,
         workflows=[StudyWorkflow],
-        activities=[mock_call_agent, mock_publish, mock_publish_findings, mock_escalate, mock_load_policy],
+        activities=[mock_call_agent, mock_publish, mock_publish_findings, mock_publish_state,
+                    mock_escalate, mock_load_policy],
         max_cached_workflows=0,
     )
 
@@ -130,6 +145,15 @@ def test_report_finalized_releases_radiologist_gate_and_archives():
                 result = await handle.result()
         assert result["finalState"] == "ARCHIVED"
         assert _STATE["escalations"] == []
+        # #108: archiving must also TELL the worklist, or the row keeps rendering as unread.
+        assert len(_STATE["read_states"]) == 1, "the terminal read-state publish did not fire"
+        wf_id, study_uid, read_state, changed_at = _STATE["read_states"][0]
+        # The StudyContext's workflowId, not Temporal's execution id -- same key publish_priority
+        # already uses, so the worklist joins both publishes on one identifier.
+        assert wf_id == STUDY_CONTEXT["workflowId"]
+        assert study_uid == STUDY_CONTEXT["study"]["studyInstanceUID"]
+        assert read_state == "ARCHIVED"
+        assert changed_at, "the publish must carry when the read finished"
     asyncio.run(scenario())
 
 
@@ -231,7 +255,7 @@ def test_repeating_rung_stops_at_the_cap_and_then_RELEASES_the_study():
         _reset([("FAIL", True), ("PASS", False)])
         async with await WorkflowEnvironment.start_time_skipping() as env:
             async with Worker(env.client, task_queue=TASK_QUEUE, workflows=[StudyWorkflow],
-                              activities=[mock_call_agent, mock_publish, mock_publish_findings, mock_escalate,
+                              activities=[mock_call_agent, mock_publish, mock_publish_findings, mock_publish_state, mock_escalate,
                                           mock_load_repeat_policy, mock_record_signoff_abandoned],
                               max_cached_workflows=0):
                 handle = await env.client.start_workflow(
@@ -286,7 +310,7 @@ def test_the_last_page_gets_a_window_to_be_answered_before_the_study_is_abandone
         _reset([("FAIL", True), ("PASS", False)])
         async with await WorkflowEnvironment.start_time_skipping() as env:
             async with Worker(env.client, task_queue=TASK_QUEUE, workflows=[StudyWorkflow],
-                              activities=[mock_call_agent, mock_publish, mock_publish_findings, mock_escalate,
+                              activities=[mock_call_agent, mock_publish, mock_publish_findings, mock_publish_state, mock_escalate,
                                           mock_load_single_rung_policy,
                                           mock_record_signoff_abandoned],
                               max_cached_workflows=0):

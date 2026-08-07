@@ -240,3 +240,68 @@ def test_worklist_mixed_triaged_and_untriaged_studies():
     order = [it["studyInstanceUID"] for it in body["items"]]
     assert order[0:2] == ["stat-1", "urgent-1"]
     assert set(order[2:]) == {"untriaged-1", "untriaged-2"}   # both present at bottom
+
+
+# --- #108: the read-complete signal -----------------------------------------
+
+def test_state_push_stores_the_read_state():
+    store = PriorityStore(":memory:")
+    r = _client(store=store).post("/state", json={
+        "studyInstanceUID": "1.2.3",
+        "workflowId": "wf_1",
+        "readState": "ARCHIVED",
+        "changedAt": "2026-08-07T19:11:42+00:00",
+    })
+    assert r.status_code == 204
+    got = store.all_read_states()["1.2.3"]
+    assert got["readState"] == "ARCHIVED"
+    assert got["readStateChangedAt"] == "2026-08-07T19:11:42+00:00"
+
+
+def test_worklist_marks_a_read_study_and_leaves_the_rest_unread():
+    """The #108 defect itself: before the read-state publish existed, a signed and archived
+    study rendered byte-identically to an unread one."""
+    store = PriorityStore(":memory:")
+    store.put("read-uid", "wf_1", "ROUTINE", 45, "t")
+    store.put("fresh-uid", "wf_2", "ROUTINE", 45, "t")
+    store.put_read_state("read-uid", "wf_1", "ARCHIVED", "2026-08-07T19:11:42+00:00", "t")
+    orthanc = FakeOrthanc([_lean("read-uid"), _lean("fresh-uid")])
+    items = _client(orthanc=orthanc, store=store).get("/worklist").json()["items"]
+    by_uid = {it["studyInstanceUID"]: it for it in items}
+    assert by_uid["read-uid"]["readState"] == "ARCHIVED"
+    assert by_uid["read-uid"]["readAt"] == "2026-08-07T19:11:42+00:00"
+    assert by_uid["fresh-uid"]["readState"] is None, "an unread study must stay null, not ''"
+    assert by_uid["fresh-uid"]["readAt"] is None
+
+
+def test_a_read_study_sinks_below_every_unread_one_whatever_its_tier():
+    """A signed STAT study outranking an unread STAT study is the failure this fixes: the
+    reading list is work left to do, and finished work does not belong at the top of it."""
+    store = PriorityStore(":memory:")
+    store.put("read-stat", "wf_1", "STAT", 100, "t")
+    store.put("unread-routine", "wf_2", "ROUTINE", 45, "t")
+    store.put_read_state("read-stat", "wf_1", "ARCHIVED", "2026-08-07T19:11:42+00:00", "t")
+    orthanc = FakeOrthanc([_lean("read-stat"), _lean("unread-routine")])
+    items = _client(orthanc=orthanc, store=store).get("/worklist").json()["items"]
+    assert [it["studyInstanceUID"] for it in items] == ["unread-routine", "read-stat"]
+
+
+def test_clearing_the_state_returns_a_study_to_the_unread_list():
+    """The run-book reset path: restage plus an event re-fire puts a study back for a fresh
+    read, and the re-fired workflow only republishes when it archives AGAIN."""
+    store = PriorityStore(":memory:")
+    store.put("uid1", "wf_1", "ROUTINE", 45, "t")
+    store.put_read_state("uid1", "wf_1", "ARCHIVED", "2026-08-07T19:11:42+00:00", "t")
+    client = _client(orthanc=FakeOrthanc([_lean("uid1")]), store=store)
+    assert client.get("/worklist").json()["items"][0]["readState"] == "ARCHIVED"
+
+    assert client.delete("/state/uid1").status_code == 204
+    assert client.get("/worklist").json()["items"][0]["readState"] is None
+
+
+def test_a_restaged_study_read_twice_upserts_rather_than_colliding():
+    store = PriorityStore(":memory:")
+    store.put_read_state("uid1", "wf_1", "ARCHIVED", "2026-08-01T10:00:00+00:00", "t1")
+    store.put_read_state("uid1", "wf_1", "ARCHIVED", "2026-08-07T19:11:42+00:00", "t2")
+    got = store.all_read_states()["uid1"]
+    assert got["readStateChangedAt"] == "2026-08-07T19:11:42+00:00"

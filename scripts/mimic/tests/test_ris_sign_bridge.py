@@ -17,6 +17,7 @@ whole post-sign pipeline hangs off:
 """
 import sys
 import pathlib
+from datetime import datetime
 
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
@@ -55,7 +56,9 @@ def _rows(monkeypatch, rows):
     monkeypatch.setattr(bridge, "completed_reports", lambda conn: rows)
 
 
-ROW = (7, "<p>Pneumothorax.</p>", "s123", "Jake", "Doctor", "prov-uuid-1")
+# The last field is the sign instant (#110), coalesce(date_changed, date_created) from the RIS row.
+SIGNED_AT = datetime(2026, 8, 7, 19, 11, 38)
+ROW = (7, "<p>Pneumothorax.</p>", "s123", "Jake", "Doctor", "prov-uuid-1", SIGNED_AT)
 
 
 # --- module import stays collectable in the pymysql-less CI lane ------------
@@ -202,7 +205,7 @@ def test_our_own_truncated_write_still_reads_as_ours(monkeypatch):
     c = _FakeClient(order={"patient_uuid": "p", "order_uuid": "o"}, fhir_id="dr-1",
                     report={"status": "final", "conclusion": ours})
     bridged = set()
-    _rows(monkeypatch, [(7, long_body, "s123", "Jake", "Doctor", "prov-uuid-1")])
+    _rows(monkeypatch, [(7, long_body, "s123", "Jake", "Doctor", "prov-uuid-1", SIGNED_AT)])
     bridge.bridge_cycle(None, c, bridged, {})
     assert 7 in bridged and not c.put_calls
 
@@ -245,7 +248,7 @@ def test_clamp_keeps_tail_when_findings_alone_too_long():
 def test_bridge_writes_marker_prefixed_tail(monkeypatch):
     c = _FakeClient(order={"patient_uuid": "p", "order_uuid": "o"}, fhir_id="dr-1")
     long_body = "HISTORY: dyspnea. " * 100 + "FINDINGS: " + "w" * 1500 + " IMPRESSION: large pneumothorax."
-    _rows(monkeypatch, [(7, long_body, "s123", "Jake", "Doctor", "prov-uuid-1")])
+    _rows(monkeypatch, [(7, long_body, "s123", "Jake", "Doctor", "prov-uuid-1", SIGNED_AT)])
     bridge.bridge_cycle(None, c, set(), {})
     (_, body), = c.put_calls
     assert body["status"] == "final"
@@ -257,7 +260,7 @@ def test_bridge_writes_marker_prefixed_tail(monkeypatch):
 
 def test_bridge_logs_the_cut(monkeypatch, capsys):
     c = _FakeClient(order={"patient_uuid": "p", "order_uuid": "o"}, fhir_id="dr-1")
-    _rows(monkeypatch, [(7, "v" * 3000, "s123", "Jake", "Doctor", "prov-uuid-1")])
+    _rows(monkeypatch, [(7, "v" * 3000, "s123", "Jake", "Doctor", "prov-uuid-1", SIGNED_AT)])
     bridge.bridge_cycle(None, c, set(), {})
     assert "caps conclusion" in capsys.readouterr().out
 
@@ -288,12 +291,44 @@ def test_missing_interpreter_still_bridges_without_performer(monkeypatch, capsys
     # Losing the sign would be worse than losing the attribution: an interpreter-less
     # COMPLETED row still flips, unstamped, and the log line says so.
     c = _FakeClient(order={"patient_uuid": "p", "order_uuid": "o"}, fhir_id="dr-1")
-    _rows(monkeypatch, [(7, "Pneumothorax.", "s123", None, None, None)])
+    _rows(monkeypatch, [(7, "Pneumothorax.", "s123", None, None, None, SIGNED_AT)])
     bridge.bridge_cycle(None, c, set(), {})
     (_, body), = c.put_calls
     assert body["status"] == "final"
     assert "performer" not in body
     assert "UNKNOWN: no interpreter recorded" in capsys.readouterr().out
+
+
+# --- #110: the flip restamps the sign instant -------------------------------
+
+def test_bridge_restamps_issued_with_the_sign_instant(monkeypatch):
+    # The flip reuses the study's SEEDED report, so without a restamp `issued` keeps the ETL
+    # seed's timestamp. The #70 hosted run produced a report signed 2026-08-07 carrying an
+    # issued of 2026-07-24, and docs/signoff-link.md maps issued -> the poller's signedAt.
+    c = _FakeClient(order={"patient_uuid": "p", "order_uuid": "o"}, fhir_id="dr-1",
+                    report={"status": "preliminary", "issued": "2026-07-24T02:14:10.000+00:00"})
+    _rows(monkeypatch, [ROW])
+    bridge.bridge_cycle(None, c, set(), {})
+    (_, body), = c.put_calls
+    assert body["issued"] == "2026-08-07T19:11:38.000+00:00", \
+        "issued must carry the sign instant, not the seed's timestamp (#110)"
+
+
+def test_bridge_leaves_issued_alone_when_the_row_carries_no_timestamp(monkeypatch):
+    # Both columns null is not a reason to invent a sign time: keep the seed value, which is at
+    # least a real timestamp, rather than stamping "now" and calling a bridge cycle the read.
+    c = _FakeClient(order={"patient_uuid": "p", "order_uuid": "o"}, fhir_id="dr-1",
+                    report={"status": "preliminary", "issued": "2026-07-24T02:14:10.000+00:00"})
+    _rows(monkeypatch, [(7, "Pneumothorax.", "s123", "Jake", "Doctor", "prov-uuid-1", None)])
+    bridge.bridge_cycle(None, c, set(), {})
+    (_, body), = c.put_calls
+    assert body["issued"] == "2026-07-24T02:14:10.000+00:00"
+    assert body["status"] == "final", "a missing timestamp must never cost the sign itself"
+
+
+def test_fhir_instant_formats_a_naive_datetime_as_utc():
+    assert bridge._fhir_instant(datetime(2026, 8, 7, 19, 11, 38)) == "2026-08-07T19:11:38.000+00:00"
+    assert bridge._fhir_instant(None) is None
 
 
 # --- #89: the AI pre-sign draft is never the sign target --------------------

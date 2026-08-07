@@ -34,6 +34,20 @@ CREATE TABLE IF NOT EXISTS study_priority (
     updated_at         TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_study_priority_wf ON study_priority (workflow_id);
+
+-- The read-complete signal (#108). Kept in its own table rather than as a column on
+-- study_priority because the two are published at OPPOSITE ends of the workflow: priority lands
+-- on the way to READY_FOR_READ, read-state at ARCHIVED. A study can legitimately have either
+-- one without the other (priority published but never read; a read study whose priority publish
+-- was lost to a blip), and a column would have forced one of those into a fake default row.
+CREATE TABLE IF NOT EXISTS study_read_state (
+    study_instance_uid TEXT PRIMARY KEY,
+    workflow_id        TEXT NOT NULL,
+    read_state         TEXT NOT NULL,
+    changed_at         TEXT NOT NULL,
+    updated_at         TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_study_read_state_wf ON study_read_state (workflow_id);
 """
 
 
@@ -86,6 +100,44 @@ class PriorityStore:
         return {r[0]: {"studyInstanceUID": r[0], "workflowId": r[1],
                        "priorityTier": r[2], "priorityScore": r[3],
                        "updatedAt": r[4]} for r in rows}
+
+    def put_read_state(self, study_instance_uid: str, workflow_id: str,
+                       read_state: str, changed_at: str, updated_at: str) -> None:
+        """Upsert the study's terminal workflow state (#108).
+
+        Upsert rather than insert-once because a restaged study is re-read: the run-book reset
+        path returns a report to preliminary and re-fires the study, and that second read must
+        overwrite the first one's record instead of colliding on the primary key."""
+        self._db.execute(
+            "INSERT INTO study_read_state "
+            "  (study_instance_uid, workflow_id, read_state, changed_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(study_instance_uid) DO UPDATE SET "
+            "  workflow_id = excluded.workflow_id, "
+            "  read_state  = excluded.read_state, "
+            "  changed_at  = excluded.changed_at, "
+            "  updated_at  = excluded.updated_at",
+            (study_instance_uid, workflow_id, read_state, changed_at, updated_at),
+        )
+        self._db.commit()
+
+    def clear_read_state(self, study_instance_uid: str) -> None:
+        """Drop a study's read record, returning it to the unread worklist.
+
+        The restage path needs this: `report_seeder.py restage` puts a study back for a fresh
+        read, and without a way to clear the record the row would stay marked read through every
+        rehearsal after the first."""
+        self._db.execute(
+            "DELETE FROM study_read_state WHERE study_instance_uid = ?", (study_instance_uid,))
+        self._db.commit()
+
+    def all_read_states(self) -> dict[str, dict]:
+        """Map from StudyInstanceUID to read-state record, for the `/worklist` join."""
+        rows = self._db.execute(
+            "SELECT study_instance_uid, workflow_id, read_state, changed_at, updated_at "
+            "FROM study_read_state").fetchall()
+        return {r[0]: {"studyInstanceUID": r[0], "workflowId": r[1], "readState": r[2],
+                       "readStateChangedAt": r[3], "updatedAt": r[4]} for r in rows}
 
     def size(self) -> int:
         return self._db.execute("SELECT COUNT(*) FROM study_priority").fetchone()[0]

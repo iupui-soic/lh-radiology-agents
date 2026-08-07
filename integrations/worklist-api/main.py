@@ -28,7 +28,9 @@ Response shape (documented, not schema-locked — the OHIF extension is issue #2
         "priorityTier":      "STAT" | "URGENT" | "ROUTINE",
         "priorityScore":     int,   // 0..100
         "workflowId":        str | null,   // null when un-triaged
-        "assignment":        {"radiologistId": str, "assignedAt": iso8601} | null
+        "assignment":        {"radiologistId": str, "assignedAt": iso8601} | null,
+        "readState":         str | null,   // #108: null = still to read; "ARCHIVED" = read
+        "readAt":            iso8601 | null
       },
       ...
     ],
@@ -74,6 +76,20 @@ class PriorityPush(BaseModel):
     workflowId:       str = Field(..., min_length=1)
     priorityTier:     str = Field(..., pattern=r"^(STAT|URGENT|ROUTINE)$")
     priorityScore:    int = Field(..., ge=0, le=100)
+
+
+class StatePush(BaseModel):
+    """Body of `POST /state` — the orchestrator's terminal-state event (#108).
+
+    Same shape and same posture as PriorityPush: flat, orchestrator-only, not part of the
+    externally-consumed /worklist contract. `readState` is left as a free string rather than an
+    enum of today's State values, because the worklist only needs to know THAT the read finished;
+    pinning the orchestrator's state vocabulary here would make every future state rename a
+    two-service change."""
+    studyInstanceUID: str = Field(..., min_length=1)
+    workflowId:       str = Field(..., min_length=1)
+    readState:        str = Field(..., min_length=1)
+    changedAt:        str = Field(..., min_length=1)
 
 
 # --- App factory -------------------------------------------------------------
@@ -123,6 +139,29 @@ def create_app(
             body.priorityTier, body.priorityScore, now_iso(),
         )
 
+    @app.post("/state", status_code=204)
+    async def push_state(body: StatePush) -> None:
+        """Orchestrator publishes the study's terminal workflow state here (#108).
+
+        Idempotent per studyInstanceUID, and re-readable: a restaged study's second read
+        overwrites the first record rather than colliding.
+
+        TODO(M3): authenticate this endpoint, together with /priority and /findings. Currently
+        open on the internal compose network only."""
+        app.state.store.put_read_state(
+            body.studyInstanceUID, body.workflowId, body.readState, body.changedAt, now_iso(),
+        )
+
+    @app.delete("/state/{study_instance_uid}", status_code=204)
+    async def clear_state(study_instance_uid: str) -> None:
+        """Return a study to the unread worklist.
+
+        The run-book reset path (`report_seeder.py restage` plus an event re-fire) puts a study
+        back for a fresh read. The re-fired workflow only republishes its read-state when it
+        archives AGAIN, so without this the row would stay marked read for the whole of the next
+        rehearsal."""
+        app.state.store.clear_read_state(study_instance_uid)
+
     @app.get("/worklist")
     async def worklist() -> dict:
         """Return studies sorted by orchestrator priority, annotated with
@@ -134,10 +173,12 @@ def create_app(
                                 detail=f"Orthanc unreachable: {e}") from e
 
         priorities = app.state.store.all()   # single query, no N+1
+        read_states = app.state.store.all_read_states()   # ditto (#108)
         items = []
         for study in studies:
             uid = study.get("studyInstanceUID", "")
             prio = priorities.get(uid)
+            read = read_states.get(uid)
             assignment = await app.state.assignment.get(uid)
             items.append({
                 **study,
@@ -145,9 +186,18 @@ def create_app(
                 "priorityScore": (prio or {}).get("priorityScore", _DEFAULT_SCORE),
                 "workflowId":    (prio or {}).get("workflowId"),
                 "assignment":    assignment,
+                # None until the orchestrator publishes a terminal state (#108). Null means
+                # "not read yet", never "we don't know", because the publish is the only writer.
+                "readState":     (read or {}).get("readState"),
+                "readAt":        (read or {}).get("readStateChangedAt"),
             })
 
         items.sort(key=lambda it: (
+            # Read studies sink below every unread one, whatever their tier (#108). A signed STAT
+            # study outranking an unread STAT study is precisely the failure this fixes: the
+            # reading list is a queue of work left to do, and finished work does not belong at
+            # the top of it.
+            1 if it["readState"] else 0,
             _TIER_RANK.get(it["priorityTier"], 99),
             -int(it["priorityScore"]),
             # A missing/empty studyDate must sort LAST within its tier, not first.

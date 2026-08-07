@@ -88,6 +88,14 @@ async def mock_publish_findings(workflow_id: str, study_instance_uid: str, ai_re
     return None
 
 
+@activity.defn(name="publish_state_activity")
+async def mock_publish_state(
+    workflow_id: str, study_instance_uid: str, read_state: str, changed_at: str,
+) -> None:
+    """Mock for #108 publish_state_activity -- never-raises like the production version."""
+    return None
+
+
 @activity.defn(name="write_presign_impression_activity")
 async def mock_write_presign(service_request_ref: str, patient_ref: str, impression_text: str) -> str:
     _STATE["write_calls"].append((service_request_ref, patient_ref, impression_text))
@@ -109,7 +117,8 @@ def _worker(env: WorkflowEnvironment) -> Worker:
         env.client,
         task_queue=TASK_QUEUE,
         workflows=[StudyWorkflow],
-        activities=[mock_call_agent, mock_publish, mock_publish_findings, mock_write_presign, mock_escalate],
+        activities=[mock_call_agent, mock_publish, mock_publish_findings, mock_publish_state,
+                    mock_write_presign, mock_escalate],
         max_cached_workflows=0,
     )
 

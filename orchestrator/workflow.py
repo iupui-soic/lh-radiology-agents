@@ -25,6 +25,7 @@ from .state import (
     ACT_CALL_AGENT,
     ACT_START_AGENT,
     ACT_PUBLISH_FINDINGS,
+    ACT_PUBLISH_STATE,
     ACT_PUBLISH_PRIORITY,
     ACT_ESCALATE,
     ACT_LOAD_ESCALATION_POLICY,
@@ -64,6 +65,12 @@ PUSH_RESULT_CAP = 32
 # every study already past that point. See the call site in run().
 PATCH_PRESIGN_IMPRESSION = "presign-impression-v1"
 PATCH_PUBLISH_FINDINGS = "publish-findings-v1"
+# Temporal patch marker for the terminal read-state publish (#108). Same hazard class as the two
+# above, and the worst possible place to hit it: this command sits at the very end of run(), so an
+# unguarded insert would fail replay for every study currently parked at the sign-off gate, right
+# as it tried to finish. Retire it (-> workflow.deprecate_patch) only once no pre-#108 workflow is
+# open.
+PATCH_PUBLISH_READ_STATE = "publish-read-state-v1"
 # Temporal patch marker for the escalation-policy dead-letter write (#54). Same hazard as the
 # presign marker: this inserts a new activity command into the sign-off-gate fallback branch, a
 # path that studies parked at the gate have ALREADY walked. Without the guard, replaying such a
@@ -780,6 +787,20 @@ class StudyWorkflow:
             ack = await self._await_ack(ctx, comms)
 
         self._state = State.ARCHIVED
+
+        # --- Tell the reading worklist the read is finished (#108) ----------------
+        # The worklist row is built from Orthanc plus the triage priority publish, so without
+        # this a signed and archived study keeps rendering as unread. Best-effort and bounded
+        # for the same reason as the findings publish: the study is already archived by the
+        # time this runs, so a publish outage must never fail the workflow at the finish line.
+        if workflow.patched(PATCH_PUBLISH_READ_STATE):
+            await workflow.execute_activity(
+                ACT_PUBLISH_STATE,
+                args=[wf_id, study_uid, self._state.value, workflow.now().isoformat()],
+                start_to_close_timeout=PRE_READ_TIMEOUT,
+                retry_policy=BOUNDED_ACTIVITY_RETRY,
+            )
+
         return {
             "workflowId": wf_id,
             "finalState": self._state.value,

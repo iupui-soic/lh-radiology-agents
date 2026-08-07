@@ -110,6 +110,10 @@ def _activities(spy: _Spy):
     async def publish_findings_activity(workflow_id, study_instance_uid, ai_result):
         return None
 
+    @activity.defn(name="publish_state_activity")
+    async def publish_state_activity(workflow_id, study_instance_uid, read_state, changed_at):
+        return None
+
     @activity.defn(name="escalate_activity")
     async def escalate_activity(workflow_id, reason, escalation=None):
         spy.pages += 1
@@ -133,6 +137,7 @@ def _activities(spy: _Spy):
         call_agent_skill_activity,
         publish_priority_activity,
         publish_findings_activity,
+        publish_state_activity,
         escalate_activity,
         load_escalation_policy_activity,
         record_signoff_abandoned_activity,
