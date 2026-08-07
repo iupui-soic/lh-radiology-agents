@@ -92,13 +92,24 @@ export function isWorklistResponse(x: unknown): x is WorklistResponse {
  * priority order the source of truth from the user's perspective.
  *
  * Sort key mirrors `integrations/worklist-api/main.py`:
- *   priorityTier bucket (STAT < URGENT < ROUTINE)
+ *   readState (unread before read, #108)
+ *   → priorityTier bucket (STAT < URGENT < ROUTINE)
  *   → priorityScore descending
  *   → studyDate ascending (older stat cases float above newer)
+ *
+ * The read-state term is FIRST, and it must stay in step with the server. #108 shipped the
+ * server half alone and this function silently undid it: a signed study still rendered at
+ * position 26 of 100, above 74 studies nobody had read, because "defensive redundancy" re-sorted
+ * the correct order away. A divergence here is invisible server-side, so treat the two sort keys
+ * as one change.
  */
 export function sortByPriority(items: WorklistItem[]): WorklistItem[] {
   const tierRank: Record<string, number> = { STAT: 0, URGENT: 1, ROUTINE: 2 };
   return [...items].sort((a, b) => {
+    // Finished work sinks below every unread study whatever its tier: the reading list is a
+    // queue of what is left to do.
+    const readDiff = (a.readState ? 1 : 0) - (b.readState ? 1 : 0);
+    if (readDiff !== 0) return readDiff;
     const tierDiff = (tierRank[a.priorityTier] ?? 99) - (tierRank[b.priorityTier] ?? 99);
     if (tierDiff !== 0) return tierDiff;
     const scoreDiff = b.priorityScore - a.priorityScore; // higher first

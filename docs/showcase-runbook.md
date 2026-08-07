@@ -147,6 +147,12 @@ and only a positive screen ever becomes a COMPLETE finding. Full detail: `docs/c
 - **Never** `docker compose down` the OpenMRS stack mid-day (documented wedge).
 - Restage a study: `python scripts/mimic/report_seeder.py finalize <study_id>` for the
   flip-to-final rehearsal path; delete probe artifacts per the worked examples in the drills.
+- **`restage` is what makes a study re-readable, and it must be run before a second RIS sign.**
+  The radiology module refuses to create a report when the order already carries a COMPLETED
+  one, and its check ignores the voided flag, so a study signed once is otherwise unsignable
+  forever (the form returns `cannot.create.already.completed`). `restage` clears that status as
+  well as voiding the row, and it also returns the row to the unread worklist (#108). Hit live
+  on 2026-08-07 while re-running an arc on an already-signed study.
 - Full reset (between sessions only): selective `docker volume rm <project>_mariadb-data` +
   seed reload; ledger and ingress volumes untouched.
 - **After any `openmrs` container recreate, rebuild the Lucene search index** or every

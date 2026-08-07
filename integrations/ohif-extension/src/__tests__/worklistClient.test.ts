@@ -35,6 +35,23 @@ const jsonResponse = (body: unknown, status = 200): Response =>
 // --- sortByPriority ---------------------------------------------------------
 
 describe('sortByPriority', () => {
+  it('sinks a read study below every unread one, whatever its tier (#108)', () => {
+    // The live miss this pins: #108 shipped the server-side sort alone, and this function
+    // re-sorted it away, leaving a signed study at position 26 of 100 on the demo host, above
+    // 74 studies nobody had read.
+    const items = [
+      item({ studyInstanceUID: 'read-stat', priorityTier: 'STAT', priorityScore: 100,
+             readState: 'ARCHIVED' }),
+      item({ studyInstanceUID: 'unread-routine', priorityTier: 'ROUTINE', priorityScore: 45 }),
+      item({ studyInstanceUID: 'unread-stat', priorityTier: 'STAT', priorityScore: 90 }),
+    ];
+    expect(sortByPriority(items).map((i) => i.studyInstanceUID)).toEqual([
+      'unread-stat',
+      'unread-routine',
+      'read-stat',
+    ]);
+  });
+
   it('orders STAT above URGENT above ROUTINE', () => {
     const items = [
       item({ studyInstanceUID: 'r', priorityTier: 'ROUTINE', priorityScore: 40 }),
