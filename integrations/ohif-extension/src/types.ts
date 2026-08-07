@@ -43,6 +43,15 @@ export interface WorklistItem {
   /** Populated once triage has run; `null` for untriaged studies. */
   workflowId: string | null;
 
+  /** #108: the study's terminal workflow state, published when the read finishes.
+   *  `null` means still to read. Widened to string for the same reason as
+   *  priorityTier: the orchestrator's state vocabulary must be free to change
+   *  without a UI release. */
+  readState?: string | null;
+
+  /** ISO8601 instant the read finished; `null` while unread. */
+  readAt?: string | null;
+
   /** Populated once LH-Radiology assignment is wired (M3); `null` in dev
    *  (see `NullAssignmentReader` in the Worklist API). */
   assignment: {

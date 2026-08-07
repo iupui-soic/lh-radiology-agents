@@ -46,6 +46,14 @@ async def mock_publish_findings(workflow_id: str, study_instance_uid: str, ai_re
     return None
 
 
+@activity.defn(name="publish_state_activity")
+async def mock_publish_state(
+    workflow_id: str, study_instance_uid: str, read_state: str, changed_at: str,
+) -> None:
+    """Mock for #108 publish_state_activity -- never-raises like the production version."""
+    return None
+
+
 @activity.defn(name="escalate_activity")
 async def mock_escalate(workflow_id: str, reason: str) -> None:
     return None
@@ -209,7 +217,8 @@ def test_refire_repairs_serviceRequest_join(tmp_path):
     async def scenario():
         async with await WorkflowEnvironment.start_time_skipping() as env:
             async with Worker(env.client, task_queue=TASK_QUEUE, workflows=[StudyWorkflow],
-                              activities=[mock_call_agent, mock_publish, mock_publish_findings, mock_escalate]):
+                              activities=[mock_call_agent, mock_publish, mock_publish_findings,
+                                          mock_publish_state, mock_escalate]):
                 ingress._STORE = ingress.IngressStore(db)
                 ingress._client = env.client
 

@@ -64,6 +64,30 @@ afterEach(() => {
 });
 
 describe('<WorkList />', () => {
+  it('marks a read study and leaves an unread one alone (#108)', async () => {
+    // The #108 defect: before the read-state publish existed, a signed and archived study
+    // rendered byte-identically to one still waiting to be read.
+    withFetch(async () =>
+      jsonResponse({
+        generatedAt: '2026-08-07T19:11Z',
+        items: [
+          item({ studyInstanceUID: 'unread' }),
+          item({ studyInstanceUID: 'done', readState: 'ARCHIVED', readAt: '2026-08-07T19:11:42Z' }),
+        ],
+      }),
+    );
+    renderWithRouter(<WorkList />);
+    await waitFor(() =>
+      expect(screen.queryByTestId('lhrad-worklist-loading')).not.toBeInTheDocument(),
+    );
+    expect(screen.getByTestId('lhrad-row-done').getAttribute('data-read-state')).toBe('ARCHIVED');
+    expect(screen.getByTestId('lhrad-row-unread').getAttribute('data-read-state')).toBe('');
+    // The word, not just the styling: colour alone would not survive a screenshot in greyscale
+    // and would tell a colour-blind reader nothing.
+    expect(screen.getByTestId('lhrad-row-done').textContent).toContain('Read');
+    expect(screen.getByTestId('lhrad-row-unread').textContent).toContain('to read');
+  });
+
   it('renders loading state initially', () => {
     withFetch(async () => new Promise(() => {})); // never resolves
     renderWithRouter(<WorkList />);

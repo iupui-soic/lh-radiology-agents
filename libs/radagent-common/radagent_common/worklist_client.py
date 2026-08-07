@@ -74,13 +74,39 @@ async def publish_priority(
     Payload shape matches integrations/worklist-api/main.py's PriorityPush
     pydantic model.
     """
-    url = base_url.rstrip("/") + "/priority"
-    payload = {
-        "studyInstanceUID": study_instance_uid,
-        "workflowId": workflow_id,
-        "priorityTier": priority_tier,
-        "priorityScore": priority_score,
-    }
+    return await _publish_json(
+        base_url.rstrip("/") + "/priority",
+        {
+            "studyInstanceUID": study_instance_uid,
+            "workflowId": workflow_id,
+            "priorityTier": priority_tier,
+            "priorityScore": priority_score,
+        },
+        label="worklist",
+        base_url=base_url,
+        workflow_id=workflow_id,
+        study_instance_uid=study_instance_uid,
+        timeout=timeout,
+    )
+
+
+async def _publish_json(
+    url: str,
+    payload: dict,
+    label: str,
+    base_url: str,
+    workflow_id: str,
+    study_instance_uid: str,
+    timeout: float,
+) -> bool:
+    """The shared never-raises, bounded-retry POST behind every publish_* helper.
+
+    Extracted when publish_state (#108) became the third caller: the priority and findings
+    helpers already carried byte-identical copies of this loop, differing only in the log
+    label, so a third copy would have made the same bug fixable in three places. `label`
+    keeps each caller's log lines exactly as they were, because operators and the run-book
+    grep for them.
+    """
     last_reason: Optional[str] = None
     for attempt in range(1, _PUBLISH_MAX_ATTEMPTS + 1):
         try:
@@ -96,7 +122,7 @@ async def publish_priority(
             # activity runs under Temporal's unbounded retry it wedges the study at
             # READY_FOR_READ forever instead of degrading to a logged visibility loss.
             _log.warning(
-                "worklist publish skipped wf=%s study=%s: unusable WORKLIST_API_URL %r (%s, no retry)",
+                f"{label} publish skipped wf=%s study=%s: unusable WORKLIST_API_URL %r (%s, no retry)",
                 workflow_id, study_instance_uid, base_url, e,
             )
             return False
@@ -107,7 +133,7 @@ async def publish_priority(
                 await _sleep_backoff(attempt)
                 continue
             _log.warning(
-                "worklist publish failed after %s attempts wf=%s study=%s: %s",
+                f"{label} publish failed after %s attempts wf=%s study=%s: %s",
                 _PUBLISH_MAX_ATTEMPTS, workflow_id, study_instance_uid, last_reason,
             )
             return False
@@ -119,7 +145,7 @@ async def publish_priority(
             # asyncio.CancelledError is a BaseException, not an Exception, so
             # Temporal activity cancellation still propagates through this clause.
             _log.warning(
-                "worklist publish skipped wf=%s study=%s: unexpected %s: %s (no retry)",
+                f"{label} publish skipped wf=%s study=%s: unexpected %s: %s (no retry)",
                 workflow_id, study_instance_uid, e.__class__.__name__, e,
             )
             return False
@@ -129,7 +155,7 @@ async def publish_priority(
         if 400 <= resp.status_code < 500:
             # Caller-side bug — same payload will 422 again. Log and give up.
             _log.warning(
-                "worklist publish rejected wf=%s study=%s: HTTP %s %s (no retry, caller bug)",
+                f"{label} publish rejected wf=%s study=%s: HTTP %s %s (no retry, caller bug)",
                 workflow_id, study_instance_uid, resp.status_code, _brief(resp),
             )
             return False
@@ -139,7 +165,7 @@ async def publish_priority(
             await _sleep_backoff(attempt)
             continue
         _log.warning(
-            "worklist publish failed after %s attempts wf=%s study=%s: %s",
+            f"{label} publish failed after %s attempts wf=%s study=%s: %s",
             _PUBLISH_MAX_ATTEMPTS, workflow_id, study_instance_uid, last_reason,
         )
         return False
@@ -168,61 +194,58 @@ async def publish_findings(
 
     Payload shape matches integrations/worklist-api/findings.py's FindingsPublish model.
     """
-    url = base_url.rstrip("/") + "/findings"
-    payload = {
-        "studyInstanceUID": study_instance_uid,
-        "workflowId": workflow_id,
-        "findings": findings,
-        "overallStatus": overall_status,
-        "generatedAt": generated_at,
-    }
-    last_reason: Optional[str] = None
-    for attempt in range(1, _PUBLISH_MAX_ATTEMPTS + 1):
-        try:
-            async with httpx.AsyncClient(timeout=timeout) as c:
-                resp = await c.post(url, json=payload)
-        except (httpx.InvalidURL, httpx.UnsupportedProtocol) as e:
-            _log.warning(
-                "findings publish skipped wf=%s study=%s: unusable WORKLIST_API_URL %r (%s, no retry)",
-                workflow_id, study_instance_uid, base_url, e,
-            )
-            return False
-        except (httpx.HTTPError, httpx.TimeoutException) as e:
-            last_reason = f"network ({e.__class__.__name__}: {e})"
-            if attempt < _PUBLISH_MAX_ATTEMPTS:
-                await _sleep_backoff(attempt)
-                continue
-            _log.warning(
-                "findings publish failed after %s attempts wf=%s study=%s: %s",
-                _PUBLISH_MAX_ATTEMPTS, workflow_id, study_instance_uid, last_reason,
-            )
-            return False
-        except Exception as e:  # noqa: BLE001 (never-raises backstop)
-            _log.warning(
-                "findings publish skipped wf=%s study=%s: unexpected %s: %s (no retry)",
-                workflow_id, study_instance_uid, e.__class__.__name__, e,
-            )
-            return False
+    return await _publish_json(
+        base_url.rstrip("/") + "/findings",
+        {
+            "studyInstanceUID": study_instance_uid,
+            "workflowId": workflow_id,
+            "findings": findings,
+            "overallStatus": overall_status,
+            "generatedAt": generated_at,
+        },
+        label="findings",
+        base_url=base_url,
+        workflow_id=workflow_id,
+        study_instance_uid=study_instance_uid,
+        timeout=timeout,
+    )
 
-        if 200 <= resp.status_code < 300:
-            return True
-        if 400 <= resp.status_code < 500:
-            _log.warning(
-                "findings publish rejected wf=%s study=%s: HTTP %s %s (no retry, caller bug)",
-                workflow_id, study_instance_uid, resp.status_code, _brief(resp),
-            )
-            return False
-        last_reason = f"HTTP {resp.status_code} {_brief(resp)}"
-        if attempt < _PUBLISH_MAX_ATTEMPTS:
-            await _sleep_backoff(attempt)
-            continue
-        _log.warning(
-            "findings publish failed after %s attempts wf=%s study=%s: %s",
-            _PUBLISH_MAX_ATTEMPTS, workflow_id, study_instance_uid, last_reason,
-        )
-        return False
 
-    return False
+async def publish_state(
+    base_url: str,
+    study_instance_uid: str,
+    workflow_id: str,
+    read_state: str,
+    changed_at: str,
+    timeout: float = _DEFAULT_TIMEOUT,
+) -> bool:
+    """POST the study's terminal workflow state to the Worklist API (#108).
+
+    Without this the reading worklist has no read-complete signal at all: a study whose
+    workflow archived still renders exactly like an unread one, so a signed study sits in the
+    list looking unread and a second reader has nothing telling them otherwise. Measured on the
+    demo host during the #70 sign run.
+
+    Same never-raises / bounded-retry contract as the two helpers above: a failed publish is a
+    visibility loss, not a correctness bug. The study is signed, verified and archived either
+    way; the row just keeps showing as unread until the next publish.
+
+    Payload shape matches integrations/worklist-api/main.py's StatePush model.
+    """
+    return await _publish_json(
+        base_url.rstrip("/") + "/state",
+        {
+            "studyInstanceUID": study_instance_uid,
+            "workflowId": workflow_id,
+            "readState": read_state,
+            "changedAt": changed_at,
+        },
+        label="read-state",
+        base_url=base_url,
+        workflow_id=workflow_id,
+        study_instance_uid=study_instance_uid,
+        timeout=timeout,
+    )
 
 
 async def _sleep_backoff(attempt: int) -> None:

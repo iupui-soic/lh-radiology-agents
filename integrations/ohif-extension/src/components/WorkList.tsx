@@ -163,6 +163,7 @@ export const WorkList: React.FC<WorkListProps> = ({
               <th style={styles.th}>Description</th>
               <th style={styles.th}>Study Date</th>
               <th style={styles.th}>Accession</th>
+              <th style={styles.th}>Status</th>
               <th style={styles.th}>Assigned To</th>
             </tr>
           </thead>
@@ -189,6 +190,7 @@ const WorklistRow: React.FC<{
     <tr
       data-testid={`lhrad-row-${item.studyInstanceUID}`}
       data-priority-tier={item.priorityTier}
+      data-read-state={item.readState ?? ''}
       onClick={() => onOpen(item.studyInstanceUID, item.accessionNumber, item)}
       onKeyDown={(e) => {
         if (e.key === 'Enter' || e.key === ' ') {
@@ -197,7 +199,7 @@ const WorklistRow: React.FC<{
         }
       }}
       tabIndex={0}
-      style={styles.row}
+      style={item.readState ? styles.readRow : styles.row}
     >
       <td style={{ ...styles.td, ...tierBadgeStyle(item.priorityTier) }}>
         {item.priorityTier}
@@ -207,6 +209,13 @@ const WorklistRow: React.FC<{
       <td style={styles.td}>{item.studyDescription || 'â€"'}</td>
       <td style={styles.td}>{formatDicomDate(item.studyDate)}</td>
       <td style={styles.td}>{item.accessionNumber || 'â€"'}</td>
+      <td style={styles.td}>
+        {item.readState ? (
+          <span style={styles.readBadge}>Read</span>
+        ) : (
+          <em style={styles.unassigned}>to read</em>
+        )}
+      </td>
       <td style={styles.td}>
         {item.assignment?.radiologistId ?? <em style={styles.unassigned}>unassigned</em>}
       </td>
@@ -270,6 +279,11 @@ const styles: Record<string, React.CSSProperties> = {
     color: '#ffdada',
   },
   unassigned: { opacity: 0.5, fontSize: '0.9em' },
+  // #108: a finished read stays visible (vanishing rows read as data loss during a demo) but
+  // must never compete with work still to do, so the row is dimmed and the badge is calm.
+  // Colour alone is not the signal: the Status column carries the word "Read" too.
+  readBadge: { color: '#8fd9a8', fontWeight: 600 },
+  readRow: { cursor: 'pointer', opacity: 0.55 },
 };
 
 function tierBadgeStyle(tier: string): React.CSSProperties {

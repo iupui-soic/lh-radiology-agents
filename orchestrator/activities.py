@@ -14,6 +14,7 @@ from radagent_common.fhir_client import Fhir2Client
 from radagent_common.worklist_client import (
     publish_findings as publish_findings_to_worklist,
     publish_priority as publish_priority_to_worklist,
+    publish_state as publish_state_to_worklist,
 )
 from radagent_common.tracing import now_iso
 from . import state
@@ -79,6 +80,36 @@ async def publish_priority_activity(workflow_id: str, study_instance_uid: str, t
         workflow_id=workflow_id,
         priority_tier=tier,
         priority_score=score,
+    )
+
+
+@activity.defn(name=state.ACT_PUBLISH_STATE)
+async def publish_state_activity(
+    workflow_id: str, study_instance_uid: str, read_state: str, changed_at: str,
+) -> None:
+    """Tell the Worklist API the study's read is finished (#108).
+
+    Before this existed the reading worklist had no read-complete signal of any kind: the row
+    was assembled from Orthanc plus the triage priority publish, so a signed and archived study
+    rendered identically to an unread one. Measured on the demo host during the #70 sign run,
+    where a study archived and `/reading` still served all 100 rows unchanged.
+
+    Best-effort, exactly like publish_priority: a failed publish means the row keeps showing as
+    unread until something republishes, which is a visibility loss and not a correctness bug.
+    The never-raises contract lives in radagent_common.worklist_client.
+
+    No DICOM tag mutation, and the orchestrator remains the source of truth for the worklist.
+    """
+    activity.logger.info(
+        "publish read-state wf=%s study=%s state=%s at=%s",
+        workflow_id, study_instance_uid, read_state, changed_at,
+    )
+    await publish_state_to_worklist(
+        state.worklist_api_base_url(),
+        study_instance_uid=study_instance_uid,
+        workflow_id=workflow_id,
+        read_state=read_state,
+        changed_at=changed_at,
     )
 
 

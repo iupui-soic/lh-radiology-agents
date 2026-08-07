@@ -111,6 +111,14 @@ async def _mock_publish_findings(workflow_id: str, study_instance_uid: str, ai_r
     return None
 
 
+@activity.defn(name="publish_state_activity")
+async def _mock_publish_state(
+    workflow_id: str, study_instance_uid: str, read_state: str, changed_at: str,
+) -> None:
+    """Mock for #108 publish_state_activity -- never-raises like the production version."""
+    return None
+
+
 @activity.defn(name="escalate_activity")
 async def _mock_escalate(workflow_id: str, reason: str, escalation: dict | None = None) -> None:
     return None
@@ -126,7 +134,8 @@ async def _run(script: dict, wf_id: str, want_history: bool = False):
     _reset(script)
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with Worker(env.client, task_queue=TASK_QUEUE, workflows=[StudyWorkflow],
-                          activities=[_mock_call, _mock_publish, _mock_publish_findings, _mock_escalate,
+                          activities=[_mock_call, _mock_publish, _mock_publish_findings,
+                                      _mock_publish_state, _mock_escalate,
                                       _mock_load_policy]):
             handle = await env.client.start_workflow(
                 StudyWorkflow.run, STUDY_CONTEXT, id=wf_id, task_queue=TASK_QUEUE)
