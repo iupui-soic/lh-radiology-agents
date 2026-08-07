@@ -136,6 +136,13 @@ def test_restage_returns_the_seed_to_preliminary_so_a_new_sign_can_bridge(monkey
     assert out["voided_ris_reports"] == [42]
     assert any("voided = 1" in sql for sql in fake_conn.cursor_obj.executed), \
         "RIS rows are voided for audit, not deleted"
+    assert not any("DELETE" in sql.upper() for sql in fake_conn.cursor_obj.executed), \
+        "the row and its author survive for audit"
+    # The module's create guard matches any COMPLETED row on the order and IGNORES voided, so
+    # voiding alone left a restaged study permanently unsignable through the RIS (proven on the
+    # demo host 2026-08-07: the report form returned cannot.create.already.completed).
+    assert any("report_status = 'DRAFT'" in sql for sql in fake_conn.cursor_obj.executed), \
+        "restage must clear COMPLETED or the study can never be signed in the RIS again"
 
 
 # --- #108: a restage must return the study to the UNREAD worklist ------------

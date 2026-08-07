@@ -72,9 +72,21 @@ def restage(c: OmrsClient, accession: str, manifest_path: str) -> dict:
                 "SELECT rr.report_id FROM radiology_report rr JOIN orders o ON o.order_id = rr.order_id "
                 "WHERE o.accession_number = %s AND rr.voided = 0", (accession,))
             for (rid,) in cur.fetchall():
+                # report_status is cleared alongside the void, and that is load-bearing, not
+                # tidiness. The module's create guard
+                # (`radiology.RadiologyReport.cannot.create.already.completed`) matches ANY row
+                # on the order with report_status = 'COMPLETED' and IGNORES `voided`, so voiding
+                # alone left the study permanently unsignable through the RIS: opening the report
+                # form returned an APIException. Proven on the demo host 2026-08-07, where a
+                # restaged study could not be re-read and flipping this one column released it.
+                # Every audit fact survives -- the row, its body, its author, void_reason and
+                # date_voided -- and 'DRAFT' is used rather than a novel value because the column
+                # is a 12-char varchar the module maps to an enum, and an unknown value risks
+                # breaking the rows the dashboard loads.
                 cur.execute(
-                    "UPDATE radiology_report SET voided = 1, date_voided = NOW(), void_reason = %s "
-                    "WHERE report_id = %s", (f"restage {accession}", rid))
+                    "UPDATE radiology_report SET voided = 1, date_voided = NOW(), "
+                    "void_reason = %s, report_status = 'DRAFT' WHERE report_id = %s",
+                    (f"restage {accession}", rid))
                 voided.append(rid)
     finally:
         conn.close()
