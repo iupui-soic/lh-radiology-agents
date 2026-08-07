@@ -63,11 +63,13 @@ ORDER_CONCEPT_UUID = os.environ.get("MIMIC_ORDER_CONCEPT_UUID", "")
 # Referring-physician seeding (#76 build item 1). The login the demo physician signs in with at the
 # ack surface (#86) needs a password that clears the OpenMRS default policy (>=8, upper+lower+digit);
 # this DEMO default is overridable per deployment and is never a real secret. Roles gate what that
-# login can do -- "Provider" by default; override to a role that grants patient-chart view on a given
-# image if the notification must be visible to the physician after login.
+# login can do -- the default now includes the module's read-only clinical-viewer role, which the
+# referring-role bootstrap (#85, docker/openmrs/bootstrap_referring_role.py) fills with the proven
+# privilege set at stack startup; a Provider-only login sees no chart and no Radiology tab (#88).
 REFERRER_PASSWORD = os.environ.get("MIMIC_REFERRER_PASSWORD", "Referring1!")
-REFERRER_ROLES = [r.strip() for r in os.environ.get("MIMIC_REFERRER_ROLES", "Provider").split(",")
-                  if r.strip()]
+REFERRER_ROLES = [r.strip() for r in os.environ.get(
+    "MIMIC_REFERRER_ROLES", "Provider,Radiology: Referring physician").split(",")
+    if r.strip()]
 
 _URGENCY = {"routine": "ROUTINE", "stat": "STAT", "urgent": "STAT", "asap": "STAT"}
 

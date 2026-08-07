@@ -82,3 +82,32 @@ second-level cache invalidation. For a deployment-time provisioning of
 an authorship-stamp concept whose lifecycle is "created once, never
 updated, never retired," that is a reasonable exchange. See the module
 docstring in `bootstrap_presign_concept.py` for the full rationale.
+
+## `bootstrap_referring_role.py` (#85)
+
+The radiology module ships `Radiology: Referring physician` with zero
+privileges, so a fresh referring-physician login sees nothing at all
+(not even the navigation gutter), and the working privilege set only
+ever lived as hand-built DB state on the showcase host. This one-shot
+makes it reproducible:
+
+- **Always:** grants the role the proven read-only privilege set
+  (captured from the working host on 2026-08-07; all Get/View/dashboard
+  entries, no writes). Grant-only and idempotent; a privilege whose
+  module is absent on the image is skipped with a warning.
+- **With `BOOTSTRAP_DEMO_REFERRERS=1`:** provisions the showcase
+  referrer logins (`dr.reyes`, `dr.okafor`, `dr.novak`) through the
+  cohort ETL's own get-or-create path (`scripts/mimic`, mounted
+  read-only), converges pre-existing Provider-only logins onto the
+  role, and verifies each login loudly.
+
+Compose wiring: the `referring-role-bootstrap` service, same idiom as
+`presign-concept-bootstrap`. Entry-path note for these logins (deep
+links only; the legacy home page 500s) is in
+`docs/showcase-runbook.md`, prerequisite 4a.
+
+The set is the PROVEN one, not a minimal one: the rehearsal-era curated
+33 privileges left the patient dashboard's Radiology tab with an empty
+orders table (#88; the module REST search needs the `Get *` family).
+Trimming is #75 least-privilege work; verify through the real pages
+before shrinking.

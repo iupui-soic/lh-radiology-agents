@@ -39,6 +39,16 @@ origin the #75 Caddy overlay serves. Nothing else is reachable off-box.
    2 step 6 for why, and what to change if you want the one-click path.
 4. Accounts: each radiologist has their own OpenMRS user; the referring-physician demo account
    password is known; the ack/override phone is on wifi that can reach the demo origin.
+4a. Referring-physician access (#85) is bootstrapped, not hand-built: the
+   `referring-role-bootstrap` one-shot (runs on every `up`) fills the module's zero-privilege
+   `Radiology: Referring physician` role with the proven read-only set, and with
+   `BOOTSTRAP_DEMO_REFERRERS=1` (set in the host env) provisions the `dr.reyes` / `dr.okafor` /
+   `dr.novak` logins (password: `MIMIC_REFERRER_PASSWORD`). Entry path for these logins is a
+   `patientDashboard.form?patientId=<id>` DEEP LINK (the notification link in arc 2 is one): the
+   legacy home page 500s for them (upstream errorhandler.jsp serialization bug), while the
+   patient dashboard, its Radiology tab included, renders fine. Do not "fix" a referrer login by
+   granting admin; re-run the bootstrap instead and check its log line
+   (`role 'Radiology: Referring physician': N granted, ...`).
 5. OpenMRS seed captured once (`scripts/dump_openmrs_seed.sh`) so recovery never costs the
    16-minute boot.
 5a. Radiology-module vendor assets fetched once per host (`docker/caddy/fetch-radiology-vendor.sh`,
