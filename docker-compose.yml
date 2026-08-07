@@ -154,7 +154,11 @@ services:
       OMRS_DB_USERNAME: openmrs
       OMRS_DB_PASSWORD: openmrs
       # Off by default: the role grant always runs; the showcase referrer ACCOUNTS are demo
-      # furniture, created only when a deployment opts in (the showcase host overlay does).
+      # furniture, created only when a deployment opts in. The account half runs over OpenMRS
+      # REST, so it needs creds that can read and create users: the dev default (admin) can,
+      # a least-privilege host service account cannot (403s, live-verified 2026-08-07). On such
+      # hosts either leave the flag off (the cohort ETL provisions the accounts at load time)
+      # or point THIS service's FHIR2_BASIC_* at an admin-capable account for the one-shot.
       BOOTSTRAP_DEMO_REFERRERS: ${BOOTSTRAP_DEMO_REFERRERS:-}
       MIMIC_REFERRER_PASSWORD: ${MIMIC_REFERRER_PASSWORD:-Referring1!}
       FHIR2_BASE_URL: http://openmrs:8080/openmrs/ws/fhir2/R4
