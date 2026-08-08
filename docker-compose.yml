@@ -59,7 +59,16 @@ services:
     #   mapping out of the omod, which is what missed it the first time.
     #   !93 stops the reference demo-data generator, which added 50 demo patients and ~20 minutes
     #   to every openmrs recreate (issue #101). Recreates on this pin are quick.
-    image: registry.gitlab.com/librehealth/radiology/lh-radiology/o3:o3-010548c5
+    # * o3-92019348 (lh-radiology!95, #112) fixes the report guard that ignored `voided`, so a
+    #   study whose report was voided could never be reported again in the RIS: the form threw
+    #   `cannot.create.already.completed` forever. That made every arc ending in a sign
+    #   single-use per study, which would have stopped a rehearsal partway through. Proven by an
+    #   A/B on this exact pin pair before the bump: same DB rows, stock image throws, fixed image
+    #   creates the draft.
+    #   REMINDER, this bump recreates `openmrs`: rebuild the Lucene index afterwards (delete the
+    #   `search.indexVersion` global property and restart) or every RIS name/identifier search
+    #   silently returns nothing. See the run-book's §6 note.
+    image: registry.gitlab.com/librehealth/radiology/lh-radiology/o3:o3-92019348
     pull_policy: missing                  # `up` pulls the published image; build only on `compose build`
     build:
       context: ../lh-radiology            # sibling checkout of lh-radiology (o3 branch)
