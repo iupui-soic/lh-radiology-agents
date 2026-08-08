@@ -202,6 +202,25 @@ the drift class behind #83 cannot recur. Only in an announced window, never mid-
 5. Smoke: §1.6 (proxy 401, `/reading` lists the cohort, one seeder `finalize` releases a
    study end to end), then §2's arc 1 once, quickly. **Load `/reading` in a browser** -- an API
    check is not a substitute, see step 3.
+
+   **Confirm the browser is running the build you just deployed**, not a cached one. Since #111
+   the entry point is served `Cache-Control: no-cache`, so an ordinary reload is enough; this
+   check is what tells you it worked. In the browser console on `/reading`:
+
+   ```js
+   [...document.querySelectorAll('script[src]')].map(s => s.src.split('/').pop())
+   ```
+
+   and compare the `app.bundle.<hash>.js` it names against the host's:
+
+   ```bash
+   docker compose -f docker-compose.yml -f docker-compose.tls.yml exec -T ohif \
+     grep -oE 'app.bundle.[a-f0-9]+.js' /usr/share/nginx/html/index.html
+   ```
+
+   The two must match. If they do not, the browser is on a stale `index.html`: hard-reload
+   once and re-check. Twice on 2026-08-07 (pre-#111) a correct deploy showed the OLD UI this
+   way while every server-side check passed, which is how the whole class of problem hides.
 6. Log the deploy (date, tag, operator) in the demo diary next to the rehearsal notes.
 
 **Bumping the o3 image pin is a different animal from an app deploy.** It recreates `openmrs`,
