@@ -192,6 +192,43 @@ def test_stale_final_is_projected_over_when_the_flag_says_so(monkeypatch, capsys
     assert "projecting the human sign over it" in out, "an overwrite must never be silent either"
 
 
+def test_our_own_prefixpoint_mangled_final_is_reprojected_clean(monkeypatch, capsys):
+    # The s56689183 class: a TinyMCE-pasted body reached the RIS row double-encoded, and the
+    # pre-fixpoint strip_html stored a half-stripped conclusion (outer tags gone, inner
+    # entities unescaped back into literal tags). Running the FIXED strip over that stored
+    # text lands exactly on today's projection -- proof it is our own old write, not a stale
+    # rehearsal finalize -- so the bridge re-projects it clean instead of refusing.
+    mangled_row = (9, "<p>&lt;p&gt;FINDINGS: Pneumothorax.&lt;/p&gt;</p>", "s124",
+                   "Wei", "Chen", "prov-2", SIGNED_AT)
+    prefixpoint_stored = "<p>FINDINGS: Pneumothorax.</p>"  # what the old one-pass strip wrote
+    c = _FakeClient(order={"patient_uuid": "p", "order_uuid": "o"}, fhir_id="dr-9",
+                    report={"status": "final", "conclusion": prefixpoint_stored})
+    bridged, missing = set(), {}
+    _rows(monkeypatch, [mangled_row])
+    bridge.bridge_cycle(None, c, bridged, missing)
+    (_, body), = c.put_calls
+    assert body["conclusion"] == "FINDINGS: Pneumothorax." and body["status"] == "final"
+    assert 9 in bridged
+    out = capsys.readouterr().out
+    assert "re-projecting it clean" in out, "a self-repair must say so"
+    assert "REFUSING" not in out and "projecting the human sign over it" not in out, \
+        "the repair must not read as a stale refusal or a flag-forced overwrite"
+
+
+def test_a_foreign_final_that_strips_differently_is_still_refused(monkeypatch, capsys):
+    # The guard the repair must never loosen: a stored text that is NOT a markup-variant of
+    # this body (here, the seeded narrative wrapped in tags) strips to ITSELF, not to the
+    # projection -- refuse, exactly as before.
+    c = _FakeClient(order={"patient_uuid": "p", "order_uuid": "o"}, fhir_id="dr-1",
+                    report={"status": "final",
+                            "conclusion": "<p>the seeded cohort narrative</p>"})
+    bridged, missing = set(), {}
+    _rows(monkeypatch, [ROW])
+    bridge.bridge_cycle(None, c, bridged, missing)
+    assert not c.put_calls and 7 not in bridged
+    assert "REFUSING" in capsys.readouterr().out
+
+
 def test_our_own_truncated_write_still_reads_as_ours(monkeypatch):
     # The comparison is "modulo strip_html and the #91 marker" by construction: what we compare
     # against is the marker-prefixed clamp we would write today. Pin it so a marker change

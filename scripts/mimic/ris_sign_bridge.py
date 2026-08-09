@@ -137,11 +137,25 @@ def bridge_cycle(conn, c, bridged: set[int], missing: dict[int, int]) -> None:
             # differing conclusion is a stale rehearsal finalize that predates the read; the
             # human sign has NOT reached fhir2, and silence here cost a live demo study
             # (s50279568, 2026-08-06).
-            if r.get("conclusion") == conclusion:
+            stored = r.get("conclusion") or ""
+            if stored == conclusion:
                 missing.pop(report_id, None)
                 bridged.add(report_id)
                 continue
-            if not OVERWRITE_STALE_FINAL:
+            if not was_truncated and strip_html(stored) == conclusion:
+                # Also ours -- written by the pre-fixpoint strip_html, which left literal
+                # tags in double-encoded bodies (the TinyMCE paste class): running the fixed
+                # strip over the stored text lands exactly on today's projection, which no
+                # foreign text can do. Re-project it clean rather than skip (the mangle is
+                # what parked s56689183 at the verification gate) and rather than refuse
+                # (which would page the operator over our own old bug). A stale rehearsal
+                # finalize never takes this branch -- its stored narrative strips to itself,
+                # not to this body. Truncated writes stay on the refuse path: the marker
+                # arithmetic makes the equality unprovable there.
+                print(f"report {report_id}: seeded DiagnosticReport/{fhir_id} for {accession} "
+                      f"holds our own pre-fixpoint half-stripped write; re-projecting it clean",
+                      flush=True)
+            elif not OVERWRITE_STALE_FINAL:
                 # Not added to `bridged`: keep retrying so a run-book restage (seed back to
                 # preliminary) is picked up on the next cycle, and reuse the miss cadence so
                 # the refusal stays visible without per-cycle spam.
@@ -151,11 +165,12 @@ def bridge_cycle(conn, c, bridged: set[int], missing: dict[int, int]) -> None:
                            f"chars stored vs {len(body_text)} signed); REFUSING to overwrite -- "
                            f"restage the study or set BRIDGE_OVERWRITE_STALE_FINAL=1")
                 continue
-            print(f"report {report_id}: seeded DiagnosticReport/{fhir_id} for {accession} was "
-                  f"already final with a different conclusion "
-                  f"({len(r.get('conclusion') or '')} chars stored vs {len(body_text)} signed); "
-                  f"BRIDGE_OVERWRITE_STALE_FINAL is set, projecting the human sign over it",
-                  flush=True)
+            else:
+                print(f"report {report_id}: seeded DiagnosticReport/{fhir_id} for {accession} was "
+                      f"already final with a different conclusion "
+                      f"({len(r.get('conclusion') or '')} chars stored vs {len(body_text)} signed); "
+                      f"BRIDGE_OVERWRITE_STALE_FINAL is set, projecting the human sign over it",
+                      flush=True)
         missing.pop(report_id, None)
         if was_truncated:
             print(f"report {report_id}: signed body is {len(body_text)} chars but fhir2 caps "
