@@ -8,12 +8,15 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import html as html_mod
 import logging
 import os
 import re
 from contextlib import asynccontextmanager
+from urllib.parse import parse_qs
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Request, Response
+from fastapi.responses import HTMLResponse, JSONResponse
 from temporalio.client import Client, WorkflowExecutionStatus
 from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
@@ -604,11 +607,158 @@ async def ohif_opened_event(body: dict) -> dict:
     return {"accepted": True, "studyInstanceUID": body["studyInstanceUID"]}
 
 
+# --- Sign-off override: the confirm page and the release endpoint (#57) ------------------------
+#
+# The escalation payload has always carried an `overrideUrl` pointing at this path, but the URL
+# answered only to a hand-built POST: the one deliberately-human step in the pipeline was a curl.
+# The GET below renders what is about to be waived and a form whose button POSTs to the same
+# path -- the ack surface's GET/POST split, for the same reason: once the URL is something people
+# open, a bare GET that released the gate would be reachable by a link prefetch.
+
+
+def _signoff_page(title: str, body_html: str, status: int = 200) -> HTMLResponse:
+    """Minimal self-contained page, the ack-surface style. `body_html` is trusted, pre-escaped
+    markup assembled by the builders below -- everything dynamic in it goes through
+    `html_mod.escape` at the call site."""
+    return HTMLResponse(
+        f"<!doctype html><html><head><meta name=\"viewport\" "
+        f"content=\"width=device-width, initial-scale=1\">"
+        f"<title>{html_mod.escape(title)}</title></head>"
+        f"<body style=\"font-family: sans-serif; max-width: 36em; margin: 3em auto;\">"
+        f"<h1 style=\"font-size:1.25em\">{html_mod.escape(title)}</h1>{body_html}</body></html>",
+        status_code=status,
+    )
+
+
+def _verification_lines(sc: dict | None) -> str:
+    """The verdict being waived, as safe markup. Rule IDs and severities ONLY: this renders on a
+    page served before any token is presented, and issue `message`/`location` may quote report
+    text (lean-reference discipline) -- so they are never read, even if present."""
+    if not sc or not sc.get("verificationStatus"):
+        return ""
+    status = html_mod.escape(str(sc["verificationStatus"]))
+    review = " (requires human review)" if sc.get("requiresHumanReview") else ""
+    rules = ", ".join(
+        f"{html_mod.escape(str(i.get('ruleId') or 'unknown-rule'))}"
+        f" [{html_mod.escape(str(i.get('severity') or '?'))}]"
+        for i in (sc.get("issues") or [])
+    )
+    out = f"<p>Verification: <strong>{status}</strong>{review}.</p>"
+    if rules:
+        out += f"<p>Held on: {rules}.</p>"
+    return out
+
+
+def _override_form(workflow_id: str, sc: dict | None, notice: str = "") -> HTMLResponse:
+    wf = html_mod.escape(workflow_id)
+    body = f"<p>Workflow <code>{wf}</code>.</p>"
+    if notice:
+        body += f"<p><em>{html_mod.escape(notice)}</em></p>"
+    body += _verification_lines(sc)
+    body += (
+        "<p>Releasing does <strong>not</strong> re-verify the report: the study proceeds to "
+        "communication carrying both the verification verdict and this acknowledgement, and "
+        "your name and reason become part of the workflow's audit record.</p>"
+        f"<form method=\"post\" action=\"/signoff/{wf}/override\">"
+        "<p><label>Acknowledged by<br>"
+        "<input name=\"acknowledgedBy\" required style=\"width:100%\" "
+        "placeholder=\"your name or Practitioner reference\"></label></p>"
+        "<p><label>Reason<br>"
+        f"<textarea name=\"reason\" required rows=\"3\" maxlength=\"{SIGNOFF_REASON_MAX}\" "
+        "style=\"width:100%\"></textarea></label></p>"
+        "<p><label>Sign-off token<br>"
+        "<input type=\"password\" name=\"token\" required style=\"width:100%\"></label></p>"
+        "<button type=\"submit\" style=\"font-size:1.1em; padding:0.6em 1.2em;\">"
+        "Release the gate</button></form>"
+    )
+    return _signoff_page("Release the sign-off gate", body)
+
+
+@app.get("/signoff/{workflow_id}/override")
+async def signoff_override_confirm(workflow_id: str) -> HTMLResponse:
+    """Renders the confirmation page. Deliberately changes NO state (see the section comment).
+
+    Best-effort context: `signoff_context` (state + the verdict being waived) with a fallback to
+    `current_state` for a worker predating that query, and a fallback to the bare form when the
+    workflow cannot be queried at all -- an on-call clinician following a paged overrideUrl must
+    land on a working page even when Temporal is having a moment; the POST re-checks everything
+    that matters."""
+    sc: dict | None = None
+    state: str | None = None
+    try:
+        client = await _temporal()
+        handle = client.get_workflow_handle(workflow_id)
+        try:
+            sc = await handle.query(StudyWorkflow.signoff_context)
+            state = (sc or {}).get("state")
+        except Exception:  # noqa: BLE001 -- deployed worker may predate the query
+            state = await handle.query(StudyWorkflow.current_state)
+    except Exception as e:  # noqa: BLE001 -- unknown workflow / Temporal down
+        _log.warning("override page: could not query %s: %s", workflow_id, _redacted(e))
+        return _override_form(
+            workflow_id, None,
+            notice="The workflow could not be queried right now; if the gate is not actually "
+                   "held, submitting will tell you.")
+
+    if state is not None and state != "AWAITING_SIGNOFF":
+        return _signoff_page(
+            "Nothing to release",
+            f"<p>Workflow <code>{html_mod.escape(workflow_id)}</code> is at "
+            f"<strong>{html_mod.escape(state)}</strong>, not AWAITING_SIGNOFF -- "
+            f"the sign-off gate is not holding this study.</p>")
+    return _override_form(workflow_id, sc)
+
+
 @app.post("/signoff/{workflow_id}/override", status_code=202)
+async def signoff_override_route(
+    workflow_id: str,
+    request: Request,
+    x_signoff_token: str = Header(default=""),
+) -> Response:
+    """Content-type seam in front of `signoff_override`. JSON callers keep the API contract
+    exactly as it was (202 + the JSON receipt; errors as JSON `detail`). The confirm page's
+    form-encoded submit carries the token as its `token` field -- a browser form cannot set a
+    header -- and gets an HTML receipt or an HTML error page back, with the same status codes."""
+    ct = (request.headers.get("content-type") or "").lower()
+    if "application/x-www-form-urlencoded" in ct:
+        # Parsed with the stdlib, not request.form(): starlette delegates ALL form parsing --
+        # urlencoded included -- to the optional python-multipart package, and a three-field
+        # form is not worth a new dependency in every image that runs the ingress.
+        raw = (await request.body()).decode("utf-8", errors="replace")
+        form = {k: v[0] for k, v in parse_qs(raw, keep_blank_values=True).items()}
+        body = {"acknowledgedBy": form.get("acknowledgedBy"), "reason": form.get("reason")}
+        token = x_signoff_token or form.get("token") or ""
+        try:
+            out = await signoff_override(workflow_id, body, x_signoff_token=token)
+        except HTTPException as e:
+            return _signoff_page(
+                "The gate is still held",
+                f"<p>{html_mod.escape(str(e.detail))}</p>"
+                f"<p>Go back and try again.</p>",
+                status=e.status_code)
+        return _signoff_page(
+            "Sign-off override -- study released",
+            f"<p>Workflow <code>{html_mod.escape(out['workflowId'])}</code>.</p>"
+            f"<p>Recorded as acknowledged by "
+            f"<strong>{html_mod.escape(out['acknowledgedBy'])}</strong> at "
+            f"{html_mod.escape(out['acknowledgedAt'])}.</p>"
+            f"<p>The study proceeds to communication carrying both the verification verdict "
+            f"and this acknowledgement.</p>")
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=422, detail="body must be a JSON object")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=422, detail="body must be a JSON object")
+    return JSONResponse(
+        await signoff_override(workflow_id, body, x_signoff_token=x_signoff_token),
+        status_code=202)
+
+
 async def signoff_override(
     workflow_id: str,
     body: dict,
-    x_signoff_token: str = Header(default=""),
+    x_signoff_token: str = "",
 ) -> dict:
     """A radiologist acknowledges a verification finding and releases the sign-off gate (#57).
 
@@ -629,6 +779,9 @@ async def signoff_override(
     safety verdict on a radiology report. With SIGNOFF_OVERRIDE_TOKEN unset the endpoint refuses to
     act at all rather than silently accepting anonymous releases -- an override nobody can be
     identified with is not an override, it is a hole.
+
+    A plain coroutine, not a route: `signoff_override_route` parses the transport (JSON or the
+    confirm page's form) and lands here, and the handler-level tests keep driving it directly.
     """
     if not SIGNOFF_OVERRIDE_TOKEN:
         raise HTTPException(

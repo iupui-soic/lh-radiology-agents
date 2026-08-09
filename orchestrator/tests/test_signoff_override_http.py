@@ -73,7 +73,10 @@ def _activities(spy: _Spy):
             # Nobody edited the report, so verification can only re-derive the same FAIL: the
             # premise of #56. That FAIL + requiresHumanReview is what opens the sign-off gate.
             spy.verifies += 1
-            return {"verificationStatus": "FAIL", "requiresHumanReview": True, "issues": []}
+            return {"verificationStatus": "FAIL", "requiresHumanReview": True,
+                    "issues": [{"ruleId": "sections-missing", "severity": "FAIL",
+                                "message": "NEVER-LEAVES-THE-WORKFLOW: quotes report text",
+                                "location": "body"}]}
         if skill_id == "triage.score":
             return {"priorityTier": "ROUTINE", "priorityScore": 50}
         if skill_id == "comms.dispatch":
@@ -154,8 +157,14 @@ async def _drive() -> dict:
                 good = {"acknowledgedBy": "Practitioner/dr-rao",
                         "reason": "reviewed with referrer; critical already phoned through"}
                 out: dict = {}
+                out["signoff_context"] = await handle.query(StudyWorkflow.signoff_context)
                 transport = ASGITransport(app=ingress.app)
                 async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
+                    # The confirm page, against the REALLY parked workflow (the fake-client tier
+                    # in test_signoff_override_page.py owns the page's branch matrix).
+                    page = await c.get(url)
+                    out["page_status"], out["page_body"] = page.status_code, page.text
+
                     # A rejected call must not release the gate (auth carried over the ASGI seam).
                     rej = await c.post(url, headers={"X-Signoff-Token": "wrong"}, json=good)
                     out["rejected_status"] = rej.status_code
@@ -183,6 +192,24 @@ def driven():
     """One deploy: stand up Temporal + a worker, park a study at the gate, and drive the real HTTP
     override endpoint. Shared by every assertion below."""
     return asyncio.run(_drive())
+
+
+def test_signoff_context_query_reports_the_held_verdict_without_issue_text(driven):
+    sc = driven["signoff_context"]
+    assert sc["state"] == "AWAITING_SIGNOFF"
+    assert sc["verificationStatus"] == "FAIL"
+    assert sc["requiresHumanReview"] is True
+    # Rule id + severity ONLY: message/location may quote report text and must be stripped
+    # AT THE QUERY, not merely ignored by the page that happens to render it today.
+    assert sc["issues"] == [{"ruleId": "sections-missing", "severity": "FAIL"}]
+
+
+def test_the_confirm_page_renders_for_a_really_parked_workflow(driven):
+    assert driven["page_status"] == 200
+    assert "<form" in driven["page_body"]
+    assert "FAIL" in driven["page_body"] and "sections-missing" in driven["page_body"]
+    assert "Release the gate" in driven["page_body"]
+    assert "NEVER-LEAVES-THE-WORKFLOW" not in driven["page_body"]
 
 
 def test_a_wrong_token_over_the_wire_is_rejected_and_leaves_the_gate_held(driven):
