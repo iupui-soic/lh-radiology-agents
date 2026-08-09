@@ -132,8 +132,10 @@ and only a positive screen ever becomes a COMPLETE finding. Full detail: `docs/c
 2. Expected: verification **WARN**, the sign-off gate holds the workflow, the tier timer arms.
 3. **Escalation page arrives** (comms channel per the rota) carrying the override link.
 4. **Phone on camera:** open
-   `https://demo.example.org/ingress/signoff/<workflowId>/override`, authenticate with the
-   override token → the study releases. Narrate: authenticated, audited, single-use per gate.
+   `https://demo.example.org/ingress/signoff/<workflowId>/override` — the confirm page shows
+   the held verdict (status + rule IDs; never report text). Enter name, reason, and the
+   override token; **Release the gate** → the "study released" receipt renders and the
+   workflow proceeds. Narrate: authenticated, audited, who-and-why on the record.
 
 ## 5. Arc 4 — pre-read EHR value (~2 min, coda)
 

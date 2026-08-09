@@ -884,3 +884,23 @@ class StudyWorkflow:
     @workflow.query
     def current_state(self) -> str:
         return self._state.value
+
+    @workflow.query
+    def signoff_context(self) -> dict:
+        """What the sign-off gate is holding on (#57): read by the ingress override confirm page.
+
+        Rule IDs and severities only, never `message`/`location`: the page that renders this is
+        served before any token is presented, and issue messages may quote report text
+        (lean-reference discipline). Read-only -- a query writes no history, so no patch marker.
+        """
+        v = self._verification or {}
+        return {
+            "state": self._state.value,
+            "verificationStatus": v.get("verificationStatus"),
+            "requiresHumanReview": bool(v.get("requiresHumanReview")),
+            "issues": [
+                {"ruleId": i.get("ruleId"), "severity": i.get("severity")}
+                for i in (v.get("issues") or [])
+                if isinstance(i, dict)
+            ],
+        }
