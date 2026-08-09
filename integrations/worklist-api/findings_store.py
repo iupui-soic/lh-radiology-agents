@@ -111,5 +111,29 @@ class FindingsStore:
             "updatedAt":        row[5],
         }
 
+    def all(self) -> dict[str, dict]:
+        """Map from StudyInstanceUID to findings record. Used by the /worklist join (#107),
+        same shape and rationale as PriorityStore.all(): single query, no N+1.
+
+        Callers get the JSON-decoded findings list -- same shape `get()` returns for the
+        per-study fetch, minus the studyInstanceUID key (it's the outer dict key here).
+        The list can be empty (all-STUBBED published run) but never missing.
+        """
+        rows = self._db.execute(
+            "SELECT study_instance_uid, workflow_id, findings_json, overall_status, "
+            "       generated_at, updated_at "
+            "FROM study_findings").fetchall()
+        return {
+            r[0]: {
+                "studyInstanceUID": r[0],
+                "workflowId":       r[1],
+                "findings":         json.loads(r[2]),
+                "overallStatus":    r[3],
+                "generatedAt":      r[4],
+                "updatedAt":        r[5],
+            }
+            for r in rows
+        }
+
     def size(self) -> int:
         return self._db.execute("SELECT COUNT(*) FROM study_findings").fetchone()[0]

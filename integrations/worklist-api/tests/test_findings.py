@@ -204,3 +204,105 @@ def test_get_returns_200_with_empty_findings_when_published_but_all_stubbed(clie
     body = resp.json()
     assert body["overallStatus"] == "STUBBED"
     assert body["findings"][0]["status"] == "STUBBED"
+
+
+# --- #107 additions: rawScore / opThreshold roundtrip ---
+
+def _payload_with_margin(**overrides) -> dict:
+    """A #86 payload: pixel-tool finding with the raw-sigmoid margin fields alongside
+    the calibrated confidence. Mirrors what agents/interpretation-assistant/handler.py
+    emits after !134 landed. Kept beside _valid_findings_payload rather than replacing
+    it: !134 pre-#86 payloads (no margin fields) must still validate."""
+    base = {
+        "studyInstanceUID": "1.2.840.113619.2.55.3.111.margin.1",
+        "workflowId": "wf_margin_1",
+        "findings": [
+            {
+                "toolId": "pneumothorax-detect",
+                "label": "Pneumothorax (screening p=0.51, raw 0.0298 vs op 0.0098)",
+                "confidence": 0.51,
+                "rawScore": 0.0298,
+                "opThreshold": 0.0098,
+                "evidenceRef": "orthanc:instance/inst-margin-1",
+                "status": "COMPLETE",
+            },
+        ],
+        "overallStatus": "COMPLETE",
+        "generatedAt": "2026-08-09T12:00:00Z",
+    }
+    base.update(overrides)
+    return base
+
+
+# --- BLOCK 2: two new tests, added to the end of the file.
+
+def test_finding_accepts_and_returns_the_margin_fields(client):
+    """#107: rawScore and opThreshold (added in #86 / !134) are the CAD margin that lets
+    the row distinguish a 3.1x-the-op-point call from a 1.01x one. Pre-fix, `Finding` had
+    `extra = 'ignore'` and silently dropped both -- the viewer banner rendered them from
+    `label` but nothing structured reached the row. This pins the roundtrip through
+    POST -> store -> GET."""
+    payload = _payload_with_margin()
+    resp = client.post("/findings", json=payload)
+    assert resp.status_code == 204
+
+    resp = client.get(f"/findings/{payload['studyInstanceUID']}")
+    assert resp.status_code == 200
+    body = resp.json()
+    findings = body["findings"]
+    assert len(findings) == 1
+    f = findings[0]
+    assert f["rawScore"] == 0.0298
+    assert f["opThreshold"] == 0.0098
+    # Confidence still carried alongside (regression guard: adding fields must not drop
+    # the pre-existing one).
+    assert f["confidence"] == 0.51
+
+
+def test_finding_tolerates_missing_margin_fields(client):
+    """A tool without an operating point (referral rule, stub, no-torch lane) emits no
+    rawScore / opThreshold. The endpoint must accept the older payload shape and store
+    None, so the row's fallback rendering can distinguish "positive exists" from
+    "positive with a real margin"."""
+    payload = {
+        "studyInstanceUID": "1.2.840.113619.2.55.3.111.margin.2",
+        "workflowId": "wf_margin_2",
+        "findings": [
+            {
+                "toolId": "referral-rule-x",
+                "label": "Suspected foo (referral reason)",
+                "confidence": None,
+                "evidenceRef": None,
+                "status": "COMPLETE",
+                # rawScore / opThreshold deliberately absent
+            },
+        ],
+        "overallStatus": "COMPLETE",
+        "generatedAt": "2026-08-09T12:00:00Z",
+    }
+    resp = client.post("/findings", json=payload)
+    assert resp.status_code == 204
+
+    resp = client.get(f"/findings/{payload['studyInstanceUID']}")
+    assert resp.status_code == 200
+    f = resp.json()["findings"][0]
+    assert f["rawScore"] is None
+    assert f["opThreshold"] is None
+
+
+def test_finding_still_ignores_unknown_extra_fields(client):
+    """`extra = 'ignore'` on the Finding model is what lets interpretation-agent evolve
+    without 422-ing this endpoint on every schema addition. #86 added rawScore and
+    opThreshold as first-class fields, but the extras policy for future additions must
+    still hold -- otherwise the next contract change breaks pre-read fan-out."""
+    payload = _payload_with_margin()
+    payload["findings"][0]["someFutureField"] = {"nested": "shape"}
+    resp = client.post("/findings", json=payload)
+    assert resp.status_code == 204
+
+    resp = client.get(f"/findings/{payload['studyInstanceUID']}")
+    assert resp.status_code == 200
+    f = resp.json()["findings"][0]
+    # Unknown field silently dropped; known fields preserved.
+    assert "someFutureField" not in f
+    assert f["rawScore"] == 0.0298

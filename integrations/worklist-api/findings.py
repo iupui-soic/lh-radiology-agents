@@ -42,6 +42,15 @@ class Finding(BaseModel):
     toolId: str
     label: str
     confidence: Optional[float] = None
+    # The CAD margin (#86): rawScore is the head's raw sigmoid (op-norm inverted from the
+    # calibrated confidence) and opThreshold is the head's raw operating point. Together they
+    # give a real distance-from-threshold that the calibrated p=0.50-0.53 near-op cluster
+    # compresses out of the display. Carried on POSITIVE and NEGATIVE findings from the pixel
+    # tool (see agents/interpretation-assistant/handler.py); null on tools without an op point
+    # (referral rules, stubs) and in the no-torch lane. Adding them here so the /worklist join
+    # sees them -- pre-!134 they were dropped at this validator's `extra = "ignore"`.
+    rawScore: Optional[float] = None
+    opThreshold: Optional[float] = None
     evidenceRef: Optional[str] = None
     status: str
 

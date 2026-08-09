@@ -27,6 +27,12 @@ Response shape (documented, not schema-locked — the OHIF extension is issue #2
         "studyDate":         str,   // "YYYYMMDD" from DICOM
         "priorityTier":      "STAT" | "URGENT" | "ROUTINE",
         "priorityScore":     int,   // 0..100
+        // #107: CAD findings joined per-study so the row can render a margin badge
+        // (raw-to-op ratio) instead of a bare "AI positive" signal. Null until the
+        // workflow publishes; otherwise the shape from /findings minus the study
+        // key. The row-side UI filters to COMPLETE for the badge and falls back to
+        // silence when rawScore/opThreshold are null (referral rules, stubs, no-torch).
+        "aiFindings":        null | { "findings": Finding[], "overallStatus": string },
         "workflowId":        str | null,   // null when un-triaged
         "assignment":        {"radiologistId": str, "assignedAt": iso8601} | null,
         "readState":         str | null,   // #108: null = still to read; "ARCHIVED" = read
@@ -101,6 +107,7 @@ def create_app(
     assignment: Optional[AssignmentReader] = None,
     ledger: Optional[CommsLedgerClient] = None,
     identity: Optional[OpenmrsIdentity] = None,
+    findings_store: Optional[FindingsStore] = None,
 ) -> FastAPI:
     app = FastAPI(title="LH-Radiology Worklist API")
 
@@ -118,7 +125,9 @@ def create_app(
     # output here after the pre-read fan-out; the OHIF extension reads back for client-side
     # AI-evidence rendering. Separate DB file from PriorityStore so the two lifecycles are
     # independent (e.g., wiping findings during dev doesn't drop worklist priority).
-    app.state.findings_store = FindingsStore(
+    # Injectable for tests (#107: /worklist joins findings, wanted a fake store); env-driven
+    # default preserved so the deployed binary is untouched by the parameter.
+    app.state.findings_store = findings_store or FindingsStore(
         os.environ.get("WORKLIST_FINDINGS_STORE_PATH", "/var/lib/lhrad/findings.sqlite"))
     app.include_router(create_findings_router(app.state.findings_store))
 
@@ -174,12 +183,20 @@ def create_app(
 
         priorities = app.state.store.all()   # single query, no N+1
         read_states = app.state.store.all_read_states()   # ditto (#108)
+        # #107: same join shape, so the reading worklist's AI indicator can render the CAD
+        # margin (rawScore vs opThreshold) rather than a bare "positive exists" signal. The
+        # cohort's positives cluster at calibrated p=0.50-0.53, which reads as a coin flip
+        # on any surface that shows only p; the raw-to-op ratio distinguishes a 3.1x call
+        # from a 1.01x one. Pass through everything the store has; the row-side UI decides
+        # what to render.
+        findings_by_uid = app.state.findings_store.all()
         items = []
         for study in studies:
             uid = study.get("studyInstanceUID", "")
             prio = priorities.get(uid)
             read = read_states.get(uid)
             assignment = await app.state.assignment.get(uid)
+            found = findings_by_uid.get(uid)
             items.append({
                 **study,
                 "priorityTier":  (prio or {}).get("priorityTier", _DEFAULT_TIER),
@@ -190,6 +207,15 @@ def create_app(
                 # "not read yet", never "we don't know", because the publish is the only writer.
                 "readState":     (read or {}).get("readState"),
                 "readAt":        (read or {}).get("readStateChangedAt"),
+                # #107: findings are None when the workflow has not yet published for this study
+                # (interpretation still running, worker down, or the study pre-dates the findings
+                # store). Never [] as a "published nothing" signal is distinct from "publish
+                # hasn't run": the UI's fallback for null is silence; for an empty published set
+                # it is also silence, but for a set with a COMPLETE the UI renders the badge.
+                "aiFindings":    None if found is None else {
+                    "findings":      found["findings"],
+                    "overallStatus": found["overallStatus"],
+                },
             })
 
         items.sort(key=lambda it: (
