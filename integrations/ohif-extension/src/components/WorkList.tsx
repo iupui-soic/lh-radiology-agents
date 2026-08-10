@@ -40,14 +40,14 @@ import {
 } from '../api/worklistClient';
 import { emitStudyOpenedEvent, buildViewerUrl } from '../api/eventClient';
 
-/** How often to re-fetch the worklist (ms). Fresh data matters â€" a new stat
+/** How often to re-fetch the worklist (ms). Fresh data matters, because a new stat
  *  case may have landed while the radiologist was reading the previous study. */
 const REFRESH_MS = 30_000;
 
 export interface WorkListProps {
   /** Radiologist identity if available from OHIF's user context. Passed to the
    *  StudyOpenedEvent so the orchestrator can track who opened what.
-   *  M2 leaves this optional â€" dev stack has no auth yet. */
+   *  M2 leaves this optional because the dev stack has no auth yet. */
   radiologistId?: string;
   /** Overridable for tests. */
   onOpenStudy?: (studyInstanceUID: string) => void;
@@ -101,7 +101,7 @@ export const WorkList: React.FC<WorkListProps> = ({
 
   const openStudy = useCallback(
     (uid: string, accession: string, study?: WorklistItem) => {
-      // Fire-and-forget event, then navigate. Never await â€" a slow event POST
+      // Fire-and-forget event, then navigate. Never await, because a slow event POST
       // should not delay the viewer opening.
       void emitStudyOpenedEvent(uid, { radiologistId });
       if (onOpenStudy) {
@@ -163,7 +163,7 @@ export const WorkList: React.FC<WorkListProps> = ({
               <th style={styles.th}>Description</th>
               <th style={styles.th}>Study Date</th>
               <th style={styles.th}>Accession</th>
-              <th style={styles.th} title="AI screening summary — raw-to-op margin for calls with an operating point">AI</th>
+              <th style={styles.th} title="AI screening summary: raw-to-op margin for calls with an operating point">AI</th>
               <th style={styles.th}>Status</th>
               <th style={styles.th}>Assigned To</th>
             </tr>
@@ -206,10 +206,10 @@ const WorklistRow: React.FC<{
         {item.priorityTier}
       </td>
       <td style={styles.td}>{item.priorityScore}</td>
-      <td style={styles.td}>{item.modality || 'â€"'}</td>
-      <td style={styles.td}>{item.studyDescription || 'â€"'}</td>
+      <td style={styles.td}>{item.modality || '\u2014'}</td>
+      <td style={styles.td}>{item.studyDescription || '\u2014'}</td>
       <td style={styles.td}>{formatDicomDate(item.studyDate)}</td>
-      <td style={styles.td}>{item.accessionNumber || 'â€"'}</td>
+      <td style={styles.td}>{item.accessionNumber || '\u2014'}</td>
       <td style={styles.td} data-testid={`lhrad-ai-cell-${item.studyInstanceUID}`}>
         <AiMarginIndicator aiFindings={item.aiFindings ?? null} />
       </td>
@@ -311,8 +311,12 @@ function marginRatio(raw: number | null, op: number | null): number | null {
   return raw / op;
 }
 
-/** Compact "3.1x" form, one decimal, clamped low bound so a 1.001x call doesn't render
- *  as "1.0x" (misleadingly rounded to the operating point). */
+/** Compact "3.1x" form, one decimal. No low-bound clamp: a call just above the operating
+ *  point renders "1.0x", which is what it is to one decimal, and the badge's title carries
+ *  the exact raw and op figures for anyone who needs the difference. An earlier version of
+ *  this comment claimed a clamp that was never implemented (#116); if a future change wants
+ *  a floor so a 1.001x reads differently from a 1.049x, that is a display decision to take
+ *  deliberately, with the test updated alongside. */
 function formatRatio(ratio: number): string {
   return `${ratio.toFixed(1)}x`;
 }
@@ -338,7 +342,7 @@ function marginBadgeStyle(ratio: number): React.CSSProperties {
 
 /** DICOM YYYYMMDD -> YYYY-MM-DD for readability. Non-8-char input passes through. */
 export function formatDicomDate(dicomDate: string): string {
-  if (!dicomDate || dicomDate.length !== 8) return dicomDate || 'â€"';
+  if (!dicomDate || dicomDate.length !== 8) return dicomDate || '\u2014';
   return `${dicomDate.slice(0, 4)}-${dicomDate.slice(4, 6)}-${dicomDate.slice(6, 8)}`;
 }
 
@@ -351,7 +355,7 @@ export function formatGeneratedAt(iso: string): string {
 }
 
 // --- inline styles ----------------------------------------------------------
-// Inlined to avoid CSS-loader integration with OHIF's webpack â€" we're a single
+// Inlined to avoid CSS-loader integration with OHIF's webpack, and we're a single
 // route with a small surface, and OHIF's webpack config is opinionated about
 // CSS-modules. Trading a lint concern for a build simplicity win.
 const styles: Record<string, React.CSSProperties> = {
