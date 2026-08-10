@@ -13,6 +13,38 @@
  * All fields are always present from the API; optional fields are the ones where
  * the Worklist API returns `null` (see the module docstring on `main.py`).
  */
+/**
+ * Summary of AI findings joined onto a worklist row (#107).
+ *
+ * Passed through from the /findings surface; the shape mirrors what the viewer's
+ * FindingsBannerPanel receives, minus the studyInstanceUID key (that's the row's UID).
+ * The row-side UI filters to COMPLETE for its margin badge and ignores STUBBED negatives
+ * (they signal nothing worth flagging on a queue view).
+ *
+ * `null` on the row means findings have not been published yet for this study; an object
+ * with an empty `findings` array means published but the tools produced no COMPLETE.
+ * Both fall back to silence on the row.
+ */
+export interface AiFindingsSummary {
+  findings: WorklistFinding[];
+  overallStatus: string;
+}
+
+/** One finding on a worklist row; same shape as FindingItem in findingsClient but kept
+ *  duplicated so the row rendering does not import the viewer's client. */
+export interface WorklistFinding {
+  toolId: string;
+  label: string;
+  status: string;
+  confidence: number | null;
+  /** The head's raw sigmoid (op-norm inverted from confidence). Null on tools without
+   *  an operating point (referral rules, stubs) and in the no-torch lane. */
+  rawScore: number | null;
+  /** The head's raw-sigmoid operating point. Same nullability. */
+  opThreshold: number | null;
+  evidenceRef: string | null;
+}
+
 export interface WorklistItem {
   /** Orthanc's internal study identifier (opaque UUID). Used when we need to route
    *  through Orthanc, e.g. via `/dicom-web/studies/{orthancStudyId}`. */
@@ -59,6 +91,14 @@ export interface WorklistItem {
     /** ISO 8601 datetime. */
     assignedAt: string;
   } | null;
+
+  /** #107: AI findings joined onto the row so the reading worklist can render a CAD
+   *  margin badge (raw-to-op ratio) rather than a bare "positive exists" indicator.
+   *  `null` when the workflow has not published findings yet for this study; an
+   *  empty `findings` array means published but nothing COMPLETE. See the type's
+   *  own docstring for the fallback contract. Optional so the field is safe to omit
+   *  in older API responses (schema-forward, not a required breaking change). */
+  aiFindings?: AiFindingsSummary | null;
 }
 
 /** Top-level shape returned by `GET /worklist`. */

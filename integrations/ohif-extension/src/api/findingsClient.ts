@@ -24,6 +24,15 @@ export interface FindingItem {
   toolId: string;
   label: string;
   confidence: number | null;
+  /** The CAD margin (#86): rawScore is the head's raw-sigmoid recovery from confidence,
+   *  opThreshold is the head's operating point. Together they distinguish a 3.1x-the-op
+   *  positive from a 1.01x one; the calibrated p alone compresses this cohort's positives
+   *  into 0.50-0.53, which reads as a coin flip on any surface that shows p by itself.
+   *  Null on tools without an operating point (referral rules, stubs) and in the
+   *  no-torch lane; the banner's label carries the same margin text verbatim already, so
+   *  these fields are for downstream consumers (e.g., the worklist row's margin badge). */
+  rawScore: number | null;
+  opThreshold: number | null;
   evidenceRef: string | null;
   /** One of "COMPLETE" | "STUBBED" | "ERROR" | "PARTIAL" per interpretation.runTools. */
   status: string;

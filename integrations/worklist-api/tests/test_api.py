@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from main import create_app
 from store import PriorityStore
+from findings_store import FindingsStore
 
 
 class FakeOrthanc:
@@ -50,11 +51,19 @@ def _lean(uid: str, orthanc_id: str = None, modality: str = "CT",
     }
 
 
-def _client(orthanc=None, store=None, assignment=None) -> TestClient:
+def _client(orthanc=None, store=None, assignment=None, findings_store=None) -> TestClient:
     orthanc = orthanc or FakeOrthanc()
     store = store or PriorityStore(":memory:")
     assignment = assignment or FakeAssignment()
-    return TestClient(create_app(orthanc=orthanc, store=store, assignment=assignment))
+    # #107: findings_store is required for /worklist to render the aiFindings column. Default
+    # to an empty in-memory store so tests that don't care about findings continue to work
+    # (aiFindings comes out None on rows the store hasn't seen, which is exactly today's
+    # pre-#107 behaviour).
+    findings_store = findings_store or FindingsStore(":memory:")
+    return TestClient(create_app(
+        orthanc=orthanc, store=store, assignment=assignment,
+        findings_store=findings_store,
+    ))
 
 
 # --- /healthz ----------------------------------------------------------------
@@ -305,3 +314,152 @@ def test_a_restaged_study_read_twice_upserts_rather_than_colliding():
     store.put_read_state("uid1", "wf_1", "ARCHIVED", "2026-08-07T19:11:42+00:00", "t2")
     got = store.all_read_states()["uid1"]
     assert got["readStateChangedAt"] == "2026-08-07T19:11:42+00:00"
+
+
+# --- #107 additions: /worklist joins aiFindings ---
+
+def _publish_findings(findings_store, uid: str, findings: list[dict],
+                      overall_status: str = "COMPLETE") -> None:
+    """Fill the findings store as if the orchestrator's publish_findings_activity had run
+    for this study. Same call the /findings router makes on POST."""
+    findings_store.put(
+        study_instance_uid=uid,
+        workflow_id=f"wf_{uid}",
+        findings=findings,
+        overall_status=overall_status,
+        generated_at="2026-08-09T12:00:00Z",
+        updated_at="2026-08-09T12:00:00Z",
+    )
+
+
+def test_worklist_carries_ai_findings_with_margin_fields():
+    """#107: the whole point of joining findings onto the row is to hand the UI the CAD
+    margin. rawScore and opThreshold must survive the store -> /worklist round trip so the
+    row can render a raw-to-op ratio badge instead of a bare "positive exists" hint."""
+    orthanc = FakeOrthanc(studies=[_lean("uid-1", accession="acc-1")])
+    findings_store = FindingsStore(":memory:")
+    _publish_findings(findings_store, "uid-1", findings=[
+        {
+            "toolId": "pneumothorax-detect",
+            "label": "Pneumothorax (screening p=0.51, raw 0.0298 vs op 0.0098)",
+            "confidence": 0.51,
+            "rawScore": 0.0298,
+            "opThreshold": 0.0098,
+            "evidenceRef": "orthanc:instance/i-1",
+            "status": "COMPLETE",
+        },
+    ])
+
+    r = _client(orthanc=orthanc, findings_store=findings_store).get("/worklist")
+    assert r.status_code == 200
+    items = r.json()["items"]
+    assert len(items) == 1
+    ai = items[0]["aiFindings"]
+    assert ai is not None
+    assert ai["overallStatus"] == "COMPLETE"
+    f = ai["findings"][0]
+    assert f["rawScore"] == 0.0298
+    assert f["opThreshold"] == 0.0098
+    assert f["confidence"] == 0.51
+
+
+def test_worklist_ai_findings_is_null_when_workflow_has_not_published():
+    """A study that Orthanc knows about but interpretation has not yet run on gets a null
+    aiFindings on the row. The UI fallback for null is silence -- an empty badge slot,
+    never a fabricated one. This distinguishes "not yet" from "ran and found nothing"
+    (which returns an object with overallStatus STUBBED)."""
+    orthanc = FakeOrthanc(studies=[_lean("uid-not-yet")])
+    r = _client(orthanc=orthanc).get("/worklist")
+    assert r.status_code == 200
+    items = r.json()["items"]
+    assert len(items) == 1
+    assert items[0]["aiFindings"] is None
+
+
+def test_worklist_ai_findings_present_but_all_stubbed():
+    """A study where the tools ran and produced no COMPLETE finding gets an aiFindings
+    object with overallStatus STUBBED and no COMPLETE entries. The UI's row-side render
+    ignores STUBBED (silence, same rendering policy as the viewer banner) -- but the
+    aiFindings blob is present, distinguishing this from a "not yet published" study.
+    Row-side silence looks the same in both cases; the distinction matters for anyone
+    reading /worklist directly (dashboards, tests)."""
+    orthanc = FakeOrthanc(studies=[_lean("uid-neg")])
+    findings_store = FindingsStore(":memory:")
+    _publish_findings(findings_store, "uid-neg", overall_status="STUBBED", findings=[
+        {
+            "toolId": "pneumothorax-detect",
+            "label": "Pneumothorax screening negative (p=0.12 < 0.5, raw 0.0055 vs op 0.0098)",
+            "confidence": None,
+            "rawScore": 0.0055,
+            "opThreshold": 0.0098,
+            "evidenceRef": "orthanc:instance/i-neg",
+            "status": "STUBBED",
+        },
+    ])
+
+    r = _client(orthanc=orthanc, findings_store=findings_store).get("/worklist")
+    items = r.json()["items"]
+    ai = items[0]["aiFindings"]
+    assert ai is not None
+    assert ai["overallStatus"] == "STUBBED"
+    # Negatives still carry rawScore/opThreshold so a downstream that wants to rank
+    # confident-negatives can (a separate decision, #107 does not take it here).
+    assert ai["findings"][0]["rawScore"] == 0.0055
+    assert ai["findings"][0]["opThreshold"] == 0.0098
+    assert ai["findings"][0]["status"] == "STUBBED"
+
+
+def test_worklist_ai_findings_fallback_when_margin_fields_null():
+    """A COMPLETE finding from a tool without an operating point (referral rule, stub, or
+    no-torch lane) has rawScore/opThreshold null. Must still surface on /worklist -- the
+    UI's fallback renders a plain "AI+" badge in this case, but for that to trigger the
+    field has to reach the row at all. Guards against a future validator that treats null
+    margins as invalid and drops the finding."""
+    orthanc = FakeOrthanc(studies=[_lean("uid-rule")])
+    findings_store = FindingsStore(":memory:")
+    _publish_findings(findings_store, "uid-rule", findings=[
+        {
+            "toolId": "referral-rule-consolidation",
+            "label": "Suspected consolidation (referral reason)",
+            "confidence": None,
+            "rawScore": None,
+            "opThreshold": None,
+            "evidenceRef": None,
+            "status": "COMPLETE",
+        },
+    ])
+
+    r = _client(orthanc=orthanc, findings_store=findings_store).get("/worklist")
+    items = r.json()["items"]
+    f = items[0]["aiFindings"]["findings"][0]
+    assert f["status"] == "COMPLETE"
+    assert f["rawScore"] is None
+    assert f["opThreshold"] is None
+
+
+def test_worklist_join_uses_single_query_no_n_plus_one(monkeypatch):
+    """The /worklist row assembly must call findings_store.all() once, not one get() per
+    study, or the join grows O(N) SQL round trips on cohort scale. Same guard as the
+    priority store's all() and read-state's all() joins. Pins the shape @sunbiz specified
+    when he asked for the join to mirror the existing pattern."""
+    orthanc = FakeOrthanc(studies=[_lean(f"uid-{i}") for i in range(5)])
+    findings_store = FindingsStore(":memory:")
+    call_count = {"all": 0, "get": 0}
+    original_all = findings_store.all
+    original_get = findings_store.get
+
+    def counting_all():
+        call_count["all"] += 1
+        return original_all()
+
+    def counting_get(uid):
+        call_count["get"] += 1
+        return original_get(uid)
+
+    monkeypatch.setattr(findings_store, "all", counting_all)
+    monkeypatch.setattr(findings_store, "get", counting_get)
+
+    r = _client(orthanc=orthanc, findings_store=findings_store).get("/worklist")
+    assert r.status_code == 200
+    assert call_count["all"] == 1, "single all() query, not per-study"
+    assert call_count["get"] == 0, "get() must not be used in the /worklist loop"

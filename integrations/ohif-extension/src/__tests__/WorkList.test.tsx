@@ -175,3 +175,167 @@ describe('<WorkList />', () => {
 
 // Ambient afterEach/beforeEach come from Vitest globals config.
 declare function afterEach(fn: () => void): void;
+
+
+// --- #107 additions: AI margin column ---
+
+import type { AiFindingsSummary, WorklistFinding } from '../types';
+
+const aiComplete = (
+  overrides: Partial<WorklistFinding> = {},
+): WorklistFinding => ({
+  toolId: 'pneumothorax-detect',
+  label: 'Pneumothorax (screening p=0.51, raw 0.0298 vs op 0.0098)',
+  status: 'COMPLETE',
+  confidence: 0.51,
+  rawScore: 0.0298,
+  opThreshold: 0.0098,
+  evidenceRef: 'orthanc:instance/i-1',
+  ...overrides,
+});
+
+const aiPayload = (findings: WorklistFinding[]): AiFindingsSummary => ({
+  findings,
+  overallStatus: findings.some((f) => f.status === 'COMPLETE') ? 'COMPLETE' : 'STUBBED',
+});
+
+describe('WorkList AI margin column', () => {
+  it('renders a raw-to-op ratio badge for a COMPLETE finding with both margin fields', async () => {
+    withFetch(async () =>
+      jsonResponse({
+        items: [item({ aiFindings: aiPayload([aiComplete()]) })],
+        generatedAt: '2026-08-09T12:00:00Z',
+      }),
+    );
+    renderWithRouter(<WorkList onOpenStudy={() => {}} />);
+    const badge = await screen.findByTestId('lhrad-ai-margin-badge');
+    // 0.0298 / 0.0098 = 3.04..., which formats as "3.0x".
+    expect(badge.textContent).toBe('3.0x');
+    // Tooltip is the full label so a reader on the row surface can see the same
+    // marginal text the banner shows in the viewer.
+    expect(badge.getAttribute('title')).toContain('raw 0.0298 vs op 0.0098');
+  });
+
+  it('picks the highest raw/op ratio when multiple COMPLETE findings are present (#27 multi-head)', async () => {
+    const strong = aiComplete({ toolId: 'effusion-detect', label: 'Effusion label',
+                                rawScore: 0.030, opThreshold: 0.010 });   // 3.0x
+    const weak = aiComplete({ toolId: 'pneumothorax-detect', label: 'PTX label',
+                              rawScore: 0.011, opThreshold: 0.010 });     // 1.1x
+    withFetch(async () =>
+      jsonResponse({
+        items: [item({ aiFindings: aiPayload([weak, strong]) })],
+        generatedAt: '2026-08-09T12:00:00Z',
+      }),
+    );
+    renderWithRouter(<WorkList onOpenStudy={() => {}} />);
+    const badge = await screen.findByTestId('lhrad-ai-margin-badge');
+    // The higher-margin call wins the slot.
+    expect(badge.textContent).toBe('3.0x');
+    expect(badge.getAttribute('data-tool-id')).toBe('effusion-detect');
+  });
+
+  it('falls back to "AI+" when a COMPLETE finding has null margin (referral rule, stub, no-torch)', async () => {
+    withFetch(async () =>
+      jsonResponse({
+        items: [item({ aiFindings: aiPayload([
+          aiComplete({
+            toolId: 'referral-rule-x',
+            label: 'Suspected foo (referral reason)',
+            confidence: null,
+            rawScore: null,
+            opThreshold: null,
+          }),
+        ]) })],
+        generatedAt: '2026-08-09T12:00:00Z',
+      }),
+    );
+    renderWithRouter(<WorkList onOpenStudy={() => {}} />);
+    const badge = await screen.findByTestId('lhrad-ai-plus-badge');
+    expect(badge.textContent).toBe('AI+');
+    expect(screen.queryByTestId('lhrad-ai-margin-badge')).toBeNull();
+  });
+
+  it('prefers the ratio badge when at least one COMPLETE has a margin, ignoring null-margin COMPLETEs for ranking', async () => {
+    const withMargin = aiComplete({ toolId: 'pneumothorax-detect',
+                                    rawScore: 0.030, opThreshold: 0.010 }); // 3.0x
+    const noMargin = aiComplete({ toolId: 'referral-rule-x', label: 'Referral',
+                                  confidence: null, rawScore: null, opThreshold: null });
+    withFetch(async () =>
+      jsonResponse({
+        items: [item({ aiFindings: aiPayload([noMargin, withMargin]) })],
+        generatedAt: '2026-08-09T12:00:00Z',
+      }),
+    );
+    renderWithRouter(<WorkList onOpenStudy={() => {}} />);
+    const badge = await screen.findByTestId('lhrad-ai-margin-badge');
+    expect(badge.textContent).toBe('3.0x');
+  });
+
+  it('renders nothing when aiFindings is null (workflow has not published yet)', async () => {
+    withFetch(async () =>
+      jsonResponse({
+        items: [item({ aiFindings: null })],
+        generatedAt: '2026-08-09T12:00:00Z',
+      }),
+    );
+    renderWithRouter(<WorkList onOpenStudy={() => {}} />);
+    // Wait for a row to render so the empty state is settled.
+    await screen.findByTestId('lhrad-row-uid-1');
+    expect(screen.queryByTestId('lhrad-ai-margin-badge')).toBeNull();
+    expect(screen.queryByTestId('lhrad-ai-plus-badge')).toBeNull();
+  });
+
+  it('renders nothing when aiFindings is present but every finding is STUBBED (silence, per policy)', async () => {
+    withFetch(async () =>
+      jsonResponse({
+        items: [item({ aiFindings: aiPayload([
+          aiComplete({ status: 'STUBBED', confidence: null, rawScore: 0.005, opThreshold: 0.010 }),
+        ]) })],
+        generatedAt: '2026-08-09T12:00:00Z',
+      }),
+    );
+    renderWithRouter(<WorkList onOpenStudy={() => {}} />);
+    await screen.findByTestId('lhrad-row-uid-1');
+    // A STUBBED finding must NEVER produce a badge on the row -- the automation-bias guard
+    // the interpretation-agent's design comment calls out (see agents/interpretation-assistant/
+    // handler.py: STUBBED = "the model ran, no finding at threshold" is not a positive claim).
+    expect(screen.queryByTestId('lhrad-ai-margin-badge')).toBeNull();
+    expect(screen.queryByTestId('lhrad-ai-plus-badge')).toBeNull();
+  });
+
+  it('renders nothing when the omitted aiFindings key is absent (backwards-compat with older API)', async () => {
+    // Older worklist-api versions don't emit aiFindings at all; the field is optional in
+    // the type. This must NOT crash and must not render a badge.
+    const noField = item();
+    delete (noField as any).aiFindings;
+    withFetch(async () =>
+      jsonResponse({
+        items: [noField],
+        generatedAt: '2026-08-09T12:00:00Z',
+      }),
+    );
+    renderWithRouter(<WorkList onOpenStudy={() => {}} />);
+    await screen.findByTestId('lhrad-row-uid-1');
+    expect(screen.queryByTestId('lhrad-ai-margin-badge')).toBeNull();
+    expect(screen.queryByTestId('lhrad-ai-plus-badge')).toBeNull();
+  });
+
+  it('column header "AI" is present between "Accession" and "Status"', async () => {
+    withFetch(async () =>
+      jsonResponse({
+        items: [item()],
+        generatedAt: '2026-08-09T12:00:00Z',
+      }),
+    );
+    renderWithRouter(<WorkList onOpenStudy={() => {}} />);
+    await screen.findByTestId('lhrad-row-uid-1');
+
+    const headers = screen.getAllByRole('columnheader').map((th) => th.textContent);
+    const acc = headers.indexOf('Accession');
+    const ai = headers.indexOf('AI');
+    const status = headers.indexOf('Status');
+    expect(acc).toBeGreaterThanOrEqual(0);
+    expect(ai).toBe(acc + 1);
+    expect(status).toBe(ai + 1);
+  });
+});
