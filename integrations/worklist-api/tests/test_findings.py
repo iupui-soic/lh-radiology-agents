@@ -234,8 +234,6 @@ def _payload_with_margin(**overrides) -> dict:
     return base
 
 
-# --- BLOCK 2: two new tests, added to the end of the file.
-
 def test_finding_accepts_and_returns_the_margin_fields(client):
     """#107: rawScore and opThreshold (added in #86 / !134) are the CAD margin that lets
     the row distinguish a 3.1x-the-op-point call from a 1.01x one. Pre-fix, `Finding` had

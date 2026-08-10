@@ -146,7 +146,5 @@ describe('FindingsBannerPanel', () => {
   });
 });
 
-// The `afterEach` import lives at test level in vitest 0.x/1.x; if this file lints against
-// a stricter type surface, replace with:
-//   import { afterEach } from 'vitest';
+// Ambient afterEach comes from Vitest globals config, same as WorkList.test.tsx.
 declare const afterEach: (fn: () => void) => void;

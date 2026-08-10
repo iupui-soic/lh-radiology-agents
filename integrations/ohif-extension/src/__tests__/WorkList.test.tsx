@@ -339,3 +339,41 @@ describe('WorkList AI margin column', () => {
     expect(status).toBe(ai + 1);
   });
 });
+
+
+// --- #116: the empty-value placeholder ---
+
+describe('WorkList empty-value placeholder', () => {
+  it('renders an em-dash, not a mojibake sequence, for every empty column', async () => {
+    // The #116 defect: the placeholder literal in WorkList.tsx was a double-encoded em-dash
+    // (U+00E2 U+20AC U+0022), so every row with an empty modality, description, accession or
+    // study date showed "a-euro-quote" instead of a dash. On the showcase cohort that was all
+    // 100 rows at once. The source now spells the character as a \u2014 escape, which is why
+    // this test asserts on the RENDERED text: an escape cannot be mangled by an editor, and a
+    // regression to a literal character would show up here rather than only in a browser.
+    // Both expected values below are escapes too, for the same reason.
+    withFetch(async () =>
+      jsonResponse({
+        items: [
+          item({
+            studyInstanceUID: 'blank',
+            modality: '',
+            studyDescription: '',
+            accessionNumber: '',
+            studyDate: '',
+          }),
+        ],
+        generatedAt: '2026-08-09T12:00:00Z',
+      }),
+    );
+    renderWithRouter(<WorkList onOpenStudy={() => {}} />);
+
+    const row = await screen.findByTestId('lhrad-row-blank');
+    const cells = [...row.querySelectorAll('td')].map((td) => td.textContent);
+    // Modality, description, study date and accession all fall back to the same placeholder.
+    const placeholders = cells.filter((c) => c === '\u2014');
+    expect(placeholders).toHaveLength(4);
+    // The specific broken bytes must never come back.
+    expect(row.textContent).not.toContain('\u00e2\u20ac');
+  });
+});
