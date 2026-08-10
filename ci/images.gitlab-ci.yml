@@ -40,6 +40,16 @@
   variables:
     DOCKER_BUILDKIT: '1'
     BUILD_CONTEXT: '.'
+    # Make the dind service plaintext on 2375 instead of TLS on 2376. The docker:dind entrypoint
+    # enables TLS whenever DOCKER_TLS_CERTDIR is non-empty, and the image defaults it to /certs,
+    # so without this the daemon listens only on 2376 while the client's DOCKER_HOST points at
+    # 2375 and every build dies with "Cannot connect to the Docker daemon at tcp://docker:2375".
+    # The 1GiB group runner already sets this in its own config, which is why the jobs pass there
+    # and failed on lh-runner. Setting it on the job makes the lane work on ANY docker-tagged
+    # runner rather than depending on invisible per-runner environment.
+    # NOTE the GitLab services health check does not catch this: it probes 2375 AND 2376 and is
+    # satisfied when either opens, so a TLS-only daemon looks healthy and fails at `docker build`.
+    DOCKER_TLS_CERTDIR: ""
   # Generous ceiling for the cold first build of the heavy images (torch, OHIF monorepo).
   # Warm --cache-from runs are far shorter. The runner sets no maximum, so this stands.
   timeout: 3h
