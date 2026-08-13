@@ -35,7 +35,7 @@ from radagent_common.tracing import now_iso
 
 from llm_draft import draft_impression
 
-AGENT_VERSION = "0.1.0"
+AGENT_VERSION = "0.2.0"
 _log = logging.getLogger(__name__)
 
 # Read-only fhir2 client for report-content lookup (#16). Lazily built so importing this module
@@ -155,6 +155,18 @@ async def handle(skill_id: str, payload: dict) -> dict:
             "Urgent clinical correlation and appropriate follow-up recommended."
         )
         recommendations = [{"text": "Urgent clinical consultation recommended."}]
+    elif finding_labels:
+        # A COMPLETE screening finding whose label carries no critical keyword (the first such
+        # producer is interpretation's effusion-detect). The constant negative below would be
+        # plainly false here -- "No acute findings identified" for a study a model just flagged,
+        # and pre-sign that text is WRITTEN to the chart -- so recite the screening labels
+        # instead. Non-critical stays non-critical: criticalFlags is empty, so nothing pages and
+        # sign-off does not escalate; this branch only fixes what the draft SAYS.
+        impression = (
+            "AI screening finding: " + "; ".join(finding_labels) + ". "
+            "Clinical correlation recommended."
+        )
+        recommendations = [{"text": "Clinical correlation recommended."}]
     else:
         impression = "No acute findings identified. Clinical correlation recommended."
         recommendations = [{"text": "Routine follow-up as clinically indicated."}]
