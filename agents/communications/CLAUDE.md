@@ -94,11 +94,29 @@ CritCom protocol format, with the category pre-decided. Invariants, all pinned i
   model reached as `host.docker.internal` needs the opt-in — that is the real deployment case.
 - **Fallback always**: flag off / no key / timeout (`COMMS_LLM_TIMEOUT_SECONDS`, default 5) /
   any error → the deterministic one-liner. The composer cannot fail or delay a page.
-- **The 5s bound is a paging decision, not a backend one.** Measured locally, `qwen2.5:7b` on an
-  ollama host takes ~12s for this prompt, so it falls back every time at the default. Raising
-  `COMMS_LLM_TIMEOUT_SECONDS` to cover it means a Cat1 page waits that long on a model — the
-  deliberate opposite of what the bound is for. Raise it, pick a faster/smaller model, or leave
-  composed prose off for critical dispatch; the default stays 5 until a PI call says otherwise.
+- **The 5s bound is a paging decision, not a backend one** — so the model is chosen to fit the
+  bound, never the bound widened to fit the model. Measured on an ollama host, this prompt, all
+  four replies accepted by the category check in every case:
+
+  | model | cold (s) | warm p50 (s) | warm max (s) |
+  |---|---|---|---|
+  | `llama3.2:3b` | 5.2 | **2.8** | **3.1** |
+  | `phi3` (3.8B) | 17.4 | 4.5 | 4.6 |
+  | `qwen2.5:7b` | 10.3 | 5.0 | 5.4 |
+
+  So a **3B-class model composes inside the bound with real headroom**, and a 7B one straddles
+  it. Prose quality is not the discriminator here — every model's reply passed the
+  contradicts-the-category check — so pick on latency.
+
+  The **cold** column is a load, not an inference: ollama evicts an idle model (default ~5 min)
+  and the next call pays to page it back in. So the first critical result after a quiet spell
+  falls back to the deterministic one-liner even on the fastest model. That is the design working
+  — nobody waits on a model — but it means a demo should warm the model at stack start (or pin it
+  resident) rather than discover the cold path live. Note `phi3` costs more cold than `qwen2.5:7b`
+  despite being half the size; size predicts warm latency, not load time.
+
+  The default timeout stays **5**. Raising it is a safety change (a Cat1 page would wait that long
+  on a model) and needs a PI call, not a config tweak.
 - **Lean-reference prompt**: category + finding label + ack window. Never the report narrative,
   never patient/order identifiers — widening this sends PHI to an external API and needs a
   #30-style review first.
