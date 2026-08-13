@@ -3,13 +3,14 @@
 The tool REGISTRY selects by modality/study-type; each selected tool then reports at one of three
 levels of reality, and the level is visible in the output rather than implied:
 
-  * PIXELS (#71, slice of #27) -- `pneumothorax-detect` runs a real pretrained classifier over the
-    study's image data (cxr_model.py) and reads its Pneumothorax head. This is the first tool in
-    the system that actually looks at the image. A POSITIVE screen reports COMPLETE, with a real
-    confidence and an evidenceRef naming the instance it scored; a NEGATIVE screen reports STUBBED
-    (the model ran, but "draft only on positives" -- see _pixel_finding). When it cannot look at
-    pixels (extras absent / no Orthanc study / non-image instances) it DEGRADES to the referral
-    reason below rather than fabricating a result.
+  * PIXELS (#71, slice of #27) -- the rows of _PIXEL_TOOL_SPECS run a real pretrained classifier
+    over the study's image data (cxr_model.py), each row reading ONE head of the shared multi-label
+    model; the study is fetched and scored once per call no matter how many rows are selected.
+    A POSITIVE screen reports COMPLETE, with a real confidence and an evidenceRef naming the
+    instance it scored; a NEGATIVE screen reports STUBBED (the model ran, but "draft only on
+    positives" -- see _head_finding). When a row cannot look at pixels (extras absent / no Orthanc
+    study / non-image instances) it DEGRADES to the referral reason below rather than fabricating
+    a result.
   * REFERRAL REASON (#27) -- the order.reasonCode cross-check. `pe-detect` uses only this; it is
     also the degrade path for `pneumothorax-detect` when the pixel read cannot run. A genuine but
     narrow interim signal, not a CAD model, so it stays STUBBED.
@@ -58,7 +59,7 @@ try:
     from radagent_common.imaging import NotAnImage, dicom_to_greyscale
     from radagent_common.orthanc_client import OrthancClient
 
-    from cxr_model import TARGET_PATHOLOGY, op_threshold, score
+    from cxr_model import op_threshold, score
 
     PIXEL_TOOLING = True
 except ImportError as _exc:  # pragma: no cover - only reachable in a lane without the extras installed
@@ -69,7 +70,6 @@ except ImportError as _exc:  # pragma: no cover - only reachable in a lane witho
         """Placeholder so the except-clause below is always a valid type."""
 
     OrthancClient = dicom_to_greyscale = score = op_threshold = None  # type: ignore[assignment]
-    TARGET_PATHOLOGY = "Pneumothorax"
 
 # A pathology is REPORTED positive when its CALIBRATED score clears this. Lives here (not in
 # cxr_model) because the decision is the handler's and the env read must work in the no-torch lane.
@@ -171,9 +171,22 @@ def _overall_status(statuses: list[str]) -> str:
     return "PARTIAL"
 
 
-# Tools that read PIXELS. Everything else in the registry either cross-checks the referral reason
-# (above) or is still a stub. pneumothorax-detect is the first real model in the system (#71).
-_PIXEL_TOOLS = frozenset({"pneumothorax-detect"})
+# Tools that read PIXELS -- the pluggable point: one row per screening finding. Everything else in
+# the registry either cross-checks the referral reason (above) or is still a stub.
+#
+# A row maps a tool id to the head it reads out of the shared multi-label CXR model plus the
+# clinical display name its labels carry. Every row reads the SAME forward pass -- score() returns
+# every head at once -- so the study's pixels are fetched and scored ONCE per handle() call no
+# matter how many rows are selected (_score_study), and adding a screening finding costs one row
+# here plus its registry entry, not a second inference. pneumothorax-detect (#71) was the first
+# real model in the system; this table is #71's special-casing generalised so the NEXT head is a
+# row, not code.
+_PIXEL_TOOL_SPECS: dict[str, dict[str, str]] = {
+    "pneumothorax-detect": {"head": "Pneumothorax", "display": "Pneumothorax"},
+}
+
+# The set view of the table, for the audit path (_tool_version): pixel tools are exactly its rows.
+_PIXEL_TOOLS = frozenset(_PIXEL_TOOL_SPECS)
 
 # ViewPosition values that mean the projection the model was trained on. Anything else -- LL,
 # LATERAL, obliques -- is a side view the CXR heads were never meant to score.
@@ -231,8 +244,8 @@ def _raw_sigmoid(calibrated: float, op_thresh: Optional[float]) -> float:
     return 1.0 - 2.0 * (1.0 - op_thresh) * (1.0 - calibrated)
 
 
-def _pneumothorax_finding(tool_id: str, probs: dict, instance_id: str) -> dict:
-    """Turn the model's Pneumothorax probability into the contract's finding.
+def _head_finding(tool_id: str, probs: dict, instance_id: str) -> dict:
+    """Turn the model's probability for this tool row's head into the contract's finding.
 
     THE "DRAFT ONLY ON POSITIVES" DECISION (#71's open question, resolved here and documented in
     CLAUDE.md). #71 asks whether a negative screen should emit COMPLETE (a draft on every study) or
@@ -242,24 +255,28 @@ def _pneumothorax_finding(tool_id: str, probs: dict, instance_id: str) -> dict:
     regardless of whether anything was flagged. A COMPLETE *negative* would therefore write "No acute
     findings identified" -- a fixed negative impression authored by nobody -- into every normal
     patient's chart ahead of the read, which is exactly the automation-bias trap the #26 COMPLETE
-    gate exists to prevent. So:
+    gate exists to prevent. The rule applies to EVERY row of _PIXEL_TOOL_SPECS, not just the first:
 
-      * POSITIVE (p >= threshold) -> COMPLETE. Arms the pre-sign draft and the Cat1 critical-comm
-        path, correctly: there is a finding to offer. The label names the pathology, which is what
-        impression-generation's keyword scan folds into criticalFlags.
+      * POSITIVE (p >= threshold) -> COMPLETE. Arms the pre-sign draft and, for pathologies on the
+        critical-keyword list, the Cat1 critical-comm path: the label names the pathology, which is
+        what impression-generation's keyword scan folds into criticalFlags.
       * NEGATIVE (p < threshold) -> STUBBED. The model ran (evidenceRef records which instance, and
         _tool_version still reports the model id), but it emits no COMPLETE, so the normal stays
         inert: no pre-sign chart write, no false Cat1 page. The label is negation-worded and is not
         scanned today anyway (impression-generation only folds COMPLETE labels), so it cannot trip a
         critical flag -- and stays correct once the scan becomes negation-aware (#78).
+
+    One global POSITIVE_THRESHOLD across every head, deliberately (#86 policy): a per-pathology
+    threshold is a clinical decision that needs a real cohort per head, and nobody has made it.
     """
-    p = probs[TARGET_PATHOLOGY]  # KeyError if the model lacks the head -> caller turns it into ERROR
+    spec = _PIXEL_TOOL_SPECS[tool_id]
+    p = probs[spec["head"]]  # KeyError if the model lacks the head -> caller turns it into ERROR
     # The margin fields (#86): the head's raw-sigmoid operating point and the raw sigmoid recovered
     # from the calibrated score. Carried on BOTH outcomes -- a negative's distance below the op
     # point is as informative as a positive's above it. op_threshold is None when the extras are
     # absent (this function is then only reachable through a test's fake) or the weights carry no
     # op point for the head; the payload degrades to null rather than a fabricated number.
-    op_t = op_threshold(TARGET_PATHOLOGY) if op_threshold is not None else None
+    op_t = op_threshold(spec["head"]) if op_threshold is not None else None
     raw = _raw_sigmoid(p, op_t)
     # In the label, the raw sigmoid against its op point -- "raw 0.021 vs op 0.0098" -- because the
     # calibrated "p=0.51" alone reads as a coin flip on every surface that shows it (#86).
@@ -268,7 +285,7 @@ def _pneumothorax_finding(tool_id: str, probs: dict, instance_id: str) -> dict:
         return {
             "toolId": tool_id,
             "label": (
-                f"Pneumothorax (screening p={p:.2f}{margin_text}); "
+                f"{spec['display']} (screening p={p:.2f}{margin_text}); "
                 "screening signal only, not a read"
             ),
             "confidence": p,
@@ -283,7 +300,7 @@ def _pneumothorax_finding(tool_id: str, probs: dict, instance_id: str) -> dict:
     return {
         "toolId": tool_id,
         "label": (
-            f"Pneumothorax screening negative (p={p:.2f} < {POSITIVE_THRESHOLD:g}{margin_text}); "
+            f"{spec['display']} screening negative (p={p:.2f} < {POSITIVE_THRESHOLD:g}{margin_text}); "
             "model ran, no finding at threshold -- screening signal only, not a read"
         ),
         "confidence": None,
@@ -294,23 +311,25 @@ def _pneumothorax_finding(tool_id: str, probs: dict, instance_id: str) -> dict:
     }
 
 
-async def _pixel_finding(tool_id: str, ctx: dict) -> Optional[dict]:
-    """Run the real model over the study's pixels, or return None to fall through to the referral
-    rule / stub.
+async def _score_study(ctx: dict) -> Optional[tuple]:
+    """Fetch the study's pixels and run the model ONCE; every selected pixel-tool row then reads
+    its own head from the same result (_pixel_result_finding). Returns:
 
-    DEGRADES, NEVER CRASHES, and separates "could not LOOK" from "the model BROKE":
-      * extras not installed / no Orthanc study id / no instances / no scoreable pixels / an Orthanc
-        or decode failure -> the study could not be screened -> return None (fall through to the
-        referral rule, then a bare stub). An Orthanc outage costs the study its screen; it must not
-        turn the tool red, and it must never be reported as the model "running";
-      * the MODEL throws once it has real pixels (a uniform frame, a model missing the target head,
-        an inference error) -> ERROR, honestly, carrying the instance it reached.
+      * ("scored", probs, instance_id) -- the model ran; probs carries every head;
+      * ("model-error", exc_name, instance_id) -- the model threw once it had real pixels (a
+        uniform frame, an inference error): an honest ERROR for every row, carrying the instance
+        the model reached;
+      * None -- could not LOOK: extras not installed / no Orthanc study id / no instances / no
+        scoreable pixels / an Orthanc or decode failure. The study could not be screened, so every
+        pixel row falls through to its referral rule, then a bare stub. An Orthanc outage costs the
+        study its screen; it must not turn the tools red, and it must never be reported as the
+        model "running".
 
-    What it must never do is invent a negative. A tool that cannot look at the image and reports
-    "nothing found" is the automation-bias trap the #26 COMPLETE-gate exists to prevent, and it is
-    worse here than in the stub, because this one carries a model's authority.
+    What this path must never do is invent a negative. A tool that cannot look at the image and
+    reports "nothing found" is the automation-bias trap the #26 COMPLETE-gate exists to prevent,
+    and it is worse here than in the stub, because this one carries a model's authority.
     """
-    if tool_id not in _PIXEL_TOOLS or not PIXEL_TOOLING:
+    if not PIXEL_TOOLING:
         return None
 
     orthanc_study_id = (ctx.get("study") or {}).get("orthancStudyId")
@@ -323,10 +342,10 @@ async def _pixel_finding(tool_id: str, ctx: dict) -> Optional[dict]:
         client = OrthancClient()
         instances = await client.list_study_instances(orthanc_study_id)
     except Exception:  # noqa: BLE001 - Orthanc unreachable -> degrade, not error
-        log.warning("pneumothorax-detect: could not list instances for %s; degrading", orthanc_study_id)
+        log.warning("pixel screen: could not list instances for %s; degrading", orthanc_study_id)
         return None
     if not instances:
-        log.warning("pneumothorax-detect: study %s has no instances", orthanc_study_id)
+        log.warning("pixel screen: study %s has no instances", orthanc_study_id)
         return None
     instances = await _frontal_first(client, instances)
 
@@ -342,18 +361,18 @@ async def _pixel_finding(tool_id: str, ctx: dict) -> Optional[dict]:
         try:
             pixels = dicom_to_greyscale(await client.get_instance_dicom(candidate))
         except NotAnImage as exc:
-            log.warning("pneumothorax-detect: %s skipping non-image instance %s (%s)",
+            log.warning("pixel screen: %s skipping non-image instance %s (%s)",
                         orthanc_study_id, candidate, exc)
             continue
         except Exception:  # noqa: BLE001 - fetch/decode failure -> could not look -> degrade
-            log.warning("pneumothorax-detect: %s could not fetch/decode instance %s; degrading",
+            log.warning("pixel screen: %s could not fetch/decode instance %s; degrading",
                         orthanc_study_id, candidate)
             return None
         instance_id = candidate
         break
     if pixels is None:
         # No scoreable pixels anywhere in the study -> fall through, never a fabricated negative.
-        log.warning("pneumothorax-detect: study %s has no scoreable image instance", orthanc_study_id)
+        log.warning("pixel screen: study %s has no scoreable image instance", orthanc_study_id)
         return None
 
     # --- model stage: the model now runs on a REAL instance, so a failure here is an honest ERROR
@@ -362,14 +381,36 @@ async def _pixel_finding(tool_id: str, ctx: dict) -> Optional[dict]:
     # does not stall every other A2A request this agent is serving.
     try:
         probs = await asyncio.to_thread(score, pixels)
-        return _pneumothorax_finding(tool_id, probs, instance_id)
-    except Exception as exc:  # noqa: BLE001 - model/head-missing failure -> ERROR, not a negative
-        log.exception("pneumothorax-detect model failed for %s", orthanc_study_id)
+        return ("scored", probs, instance_id)
+    except Exception as exc:  # noqa: BLE001 - model failure -> ERROR for every row, not a negative
+        log.exception("pixel screen model failed for %s", orthanc_study_id)
+        return ("model-error", type(exc).__name__, instance_id)
+
+
+def _pixel_result_finding(tool_id: str, outcome: tuple) -> dict:
+    """One tool row's finding from the shared scoring outcome. A model that threw is an honest
+    ERROR for every row (the failure was the study's single forward pass); a model missing THIS
+    row's head is an ERROR for this row only -- surfaced, never a crash and never a silent miss."""
+    kind = outcome[0]
+    if kind == "model-error":
+        _, exc_name, instance_id = outcome
+        return {
+            "toolId": tool_id,
+            "label": f"screening model failed: {exc_name}",
+            "confidence": None,
+            "evidenceRef": f"orthanc:instance/{instance_id}",  # the model reached this instance
+            "status": "ERROR",
+        }
+    _, probs, instance_id = outcome
+    try:
+        return _head_finding(tool_id, probs, instance_id)
+    except KeyError as exc:
+        log.exception("%s: loaded weights lack head %s", tool_id, _PIXEL_TOOL_SPECS[tool_id]["head"])
         return {
             "toolId": tool_id,
             "label": f"screening model failed: {type(exc).__name__}",
             "confidence": None,
-            "evidenceRef": f"orthanc:instance/{instance_id}",  # the model reached this instance
+            "evidenceRef": f"orthanc:instance/{instance_id}",
             "status": "ERROR",
         }
 
@@ -464,11 +505,21 @@ async def handle(skill_id: str, payload: dict) -> dict:
     reason_codes = ctx.get("order", {}).get("reasonCode") or []
     tools = select_tools(modality, desc)
 
+    # ONE shared scoring pass for however many pixel-tool rows the registry selected: the model
+    # scores every head in a single forward, so fetching/scoring per row would be the same numbers
+    # at N times the cost. None when no pixel row is selected or the study could not be looked at.
+    pixel_outcome = None
+    if any(t in _PIXEL_TOOL_SPECS for t in tools):
+        pixel_outcome = await _score_study(ctx)
+
     findings = []
     for tool in tools:
         # Pixel result wins when the model ran (COMPLETE positive, STUBBED negative, or ERROR); a
-        # None means it could not look, so fall back to the referral-reason cross-check, then a stub.
-        real = await _pixel_finding(tool, ctx)
+        # None outcome means it could not look, so fall back to the referral-reason cross-check,
+        # then a stub.
+        real = None
+        if tool in _PIXEL_TOOL_SPECS and pixel_outcome is not None:
+            real = _pixel_result_finding(tool, pixel_outcome)
         if real is None and tool in _REASON_CODE_RULES:
             real = _reason_finding(tool, reason_codes)
         findings.append(real or {
