@@ -201,6 +201,97 @@ class TestScoreToTier:
         assert _score_to_tier(score) == tier
 
 
+# --- End-to-end boundaries and edge cases -----------------------------------
+
+
+@pytest.mark.parametrize(
+    ("priority", "modality", "expected_score", "expected_tier"),
+    [
+        ("stat", "CT", 85, "STAT"),
+        ("urgent", "DX", 65, "URGENT"),
+    ],
+)
+async def test_reachable_tier_cutoffs_through_handler(
+    priority, modality, expected_score, expected_tier,
+):
+    ctx = {
+        **SAMPLE_CONTEXT,
+        "study": {
+            **SAMPLE_CONTEXT["study"],
+            "modality": modality,
+            "studyDescription": "",
+        },
+        "order": {"priority": priority, "reasonCode": []},
+    }
+
+    out = await handle("triage.score", {"studyContext": ctx})
+
+    validate_skill_output("triage.score", out)
+    assert out["priorityScore"] == expected_score
+    assert out["priorityTier"] == expected_tier
+
+
+@pytest.mark.parametrize(
+    ("reason_code", "expected_score", "rationale_fragment"),
+    [
+        ("I63.9", 75, "cerebral infarction"),
+        ("Z00.0", 50, None),
+    ],
+)
+async def test_reason_code_prefix_matching(
+    reason_code, expected_score, rationale_fragment,
+):
+    ctx = {
+        **SAMPLE_CONTEXT,
+        "study": {
+            **SAMPLE_CONTEXT["study"],
+            "modality": "DX",
+            "studyDescription": "",
+        },
+        "order": {"reasonCode": [reason_code]},
+    }
+
+    out = await handle("triage.score", {"studyContext": ctx})
+
+    validate_skill_output("triage.score", out)
+    assert out["priorityScore"] == expected_score
+    if rationale_fragment:
+        assert any(rationale_fragment in line for line in out["rationale"])
+    else:
+        assert not any(reason_code in line for line in out["rationale"])
+
+
+@pytest.mark.parametrize(
+    ("order", "modality"),
+    [
+        (None, "DX"),
+        ({"reasonCode": []}, "DX"),
+        ({}, "UNKNOWN"),
+    ],
+    ids=["missing-order", "empty-reason-code", "unknown-modality"],
+)
+async def test_sparse_and_unknown_inputs_return_valid_payload(order, modality):
+    ctx = {
+        **SAMPLE_CONTEXT,
+        "study": {
+            **SAMPLE_CONTEXT["study"],
+            "modality": modality,
+            "studyDescription": "",
+        },
+    }
+    if order is None:
+        ctx.pop("order", None)
+    else:
+        ctx["order"] = order
+
+    out = await handle("triage.score", {"studyContext": ctx})
+
+    validate_skill_output("triage.score", out)
+    assert out["priorityScore"] == BASE_SCORE
+    assert out["priorityTier"] == "ROUTINE"
+    assert out["rationale"]
+
+
 # --- End-to-end scoring across the shared demo fixtures ----------------------
 
 
@@ -254,20 +345,23 @@ def _routine_cutoff() -> int:
     return _URGENT_CUTOFF
 
 
-async def test_score_is_bounded():
-    """Any combination of signals must respect the schema's 0-100 bound (defense
-    in depth on top of the cap in `handle`)."""
-    # Stack every STAT signal we can from context alone.
+async def test_score_clamps_at_100_and_records_each_bonus():
+    """STAT priority + stroke + CT totals 110 before clamping."""
     ctx = {
         **SAMPLE_CONTEXT,
         "study": {
             "studyInstanceUID": "x", "orthancStudyId": "x",
-            "modality": "CTA",
-            "studyDescription": "CT CHEST STAT CODE TRAUMA STROKE ACUTE R/O PE",
-            "numberOfInstances": 1200,
+            "modality": "CT",
+            "studyDescription": "",
         },
-        "order": {"priority": "stat", "reasonCode": ["I21.9", "R57.0", "I26.99", "S06.5"]},
+        "order": {"priority": "stat", "reasonCode": ["I63.9"]},
     }
+
     out = await handle("triage.score", {"studyContext": ctx})
-    assert 0 <= out["priorityScore"] <= 100
+
+    validate_skill_output("triage.score", out)
+    assert out["priorityScore"] == 100
     assert out["priorityTier"] == "STAT"
+    assert any("order priority=stat (+30)" in line for line in out["rationale"])
+    assert any("modality=CT (+5)" in line for line in out["rationale"])
+    assert any("reason I63.9" in line and "+25" in line for line in out["rationale"])
