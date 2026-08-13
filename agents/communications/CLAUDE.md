@@ -79,20 +79,37 @@ The deterministic layer **decides** (category, recipient, deadline, escalation �
 model-free-trigger thesis); the composer only **writes** the physician-facing message in the
 CritCom protocol format, with the category pre-decided. Invariants, all pinned in
 `tests/test_composer.py`:
-- `COMMS_LLM_COMPOSER` defaults **off**; `COMMS_LLM_MODEL` defaults `gemini-2.5-flash-lite`;
-  `GEMINI_API_KEY` comes from the operator's environment only — never a file, never a log line
-  (it rides the `x-goog-api-key` header, not the URL).
+- `COMMS_LLM_COMPOSER` defaults **off** and is the only switch on either backend.
+- **Two backends, one behaviour.** Unset `COMMS_LLM_BASE_URL` → the Gemini path
+  (`COMMS_LLM_MODEL` defaults `gemini-2.5-flash-lite`, `GEMINI_API_KEY` required). Set it → any
+  OpenAI-compatible `/chat/completions` endpoint, which is what makes the #77 hosting decision
+  (local open-weights, no third-party cloud) reachable at all; `COMMS_LLM_MODEL` is then required
+  (half-set warns and falls back — it never silently reverts to Gemini) and `COMMS_LLM_API_KEY` is
+  optional, since a local model wants none.
+- Keys come from the operator's environment only — never a file, never a log line. `GEMINI_API_KEY`
+  rides `x-goog-api-key`, `COMMS_LLM_API_KEY` rides `Authorization`; neither touches a URL.
+- **Egress transport guard** (`COMMS_LLM_ALLOW_INSECURE`, same truthy set): `https` or a genuine
+  loopback host is fine; plaintext to anything else is refused, because the finding label is
+  cohort-derived. Note from a **container** nothing on the docker host is loopback, so a local
+  model reached as `host.docker.internal` needs the opt-in — that is the real deployment case.
 - **Fallback always**: flag off / no key / timeout (`COMMS_LLM_TIMEOUT_SECONDS`, default 5) /
   any error → the deterministic one-liner. The composer cannot fail or delay a page.
+- **The 5s bound is a paging decision, not a backend one.** Measured locally, `qwen2.5:7b` on an
+  ollama host takes ~12s for this prompt, so it falls back every time at the default. Raising
+  `COMMS_LLM_TIMEOUT_SECONDS` to cover it means a Cat1 page waits that long on a model — the
+  deliberate opposite of what the bound is for. Raise it, pick a faster/smaller model, or leave
+  composed prose off for critical dispatch; the default stays 5 until a PI call says otherwise.
 - **Lean-reference prompt**: category + finding label + ack window. Never the report narrative,
   never patient/order identifiers — widening this sends PHI to an external API and needs a
   #30-style review first.
 - Only the critical dispatch path composes; the #29 rung and routine results never consult it.
 - **Prose cannot contradict the decision** (the #77 consistency precedent): composed text that
   names a different ACR category — or none — is rejected and the deterministic one-liner pages.
-- The truthy set is byte-for-byte the family's (`{1,true,yes}` — !73 item 3), and
-  `COMMS_LLM_MODEL` must be a plain model token (it rides the URL path; anything else falls back).
-- Wired: 4 env pass-throughs on the compose `communications` service, all default-empty (off).
+- The truthy set is byte-for-byte the family's (`{1,true,yes}` — !73 item 3). On the **Gemini**
+  path `COMMS_LLM_MODEL` must be a plain model token (it rides the URL path; anything else falls
+  back); on the OpenAI-compatible path it is a body field, so names like `qwen2.5:7b` are legal
+  and that constraint is deliberately **not** applied.
+- Wired: 7 env pass-throughs on the compose `communications` service, all default-empty (off).
 - The chart write (#79's ehr-inbox) always carries the deterministic LABEL, never the composed
   prose — the Observation stays minimal-content whatever the composer produced.
 

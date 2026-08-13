@@ -564,12 +564,19 @@ services:
       # so a local rehearsal doesn't need a hand-edited compose.
       CRITCOM_ACK_HMAC_SECRET: ${CRITCOM_ACK_HMAC_SECRET:-}
       CRITCOM_ACK_BASE_URL: ${CRITCOM_ACK_BASE_URL:-}
-      # Optional Gemini-composed notification prose (composer.py): pass-throughs only, all
-      # defaulting to empty (= off) -- the flag is the only switch, and the key NEVER lives in
-      # this file (operator environment only; it rides the x-goog-api-key header, no URL/log).
+      # Optional LLM-composed notification prose (composer.py): pass-throughs only, all defaulting
+      # to empty (= off) -- COMMS_LLM_COMPOSER is the only switch, and no key EVER lives in this
+      # file (operator environment only; they ride headers, never a URL or a log line).
+      # COMMS_LLM_BASE_URL unset = the Gemini path; set = any OpenAI-compatible /chat/completions
+      # endpoint, which is how the #77 decision (local open-weights, no third-party cloud) is
+      # actually reachable. COMMS_LLM_ALLOW_INSECURE is needed for a local model on the docker
+      # HOST -- from inside this container host.docker.internal is not loopback.
       COMMS_LLM_COMPOSER: ${COMMS_LLM_COMPOSER:-}
       COMMS_LLM_MODEL: ${COMMS_LLM_MODEL:-}
       COMMS_LLM_TIMEOUT_SECONDS: ${COMMS_LLM_TIMEOUT_SECONDS:-}
+      COMMS_LLM_BASE_URL: ${COMMS_LLM_BASE_URL:-}
+      COMMS_LLM_API_KEY: ${COMMS_LLM_API_KEY:-}
+      COMMS_LLM_ALLOW_INSECURE: ${COMMS_LLM_ALLOW_INSECURE:-}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
     depends_on:
       comms-ledger:

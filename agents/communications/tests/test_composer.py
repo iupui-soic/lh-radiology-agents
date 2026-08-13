@@ -59,7 +59,8 @@ def composer_env():
     """Every test starts with the composer's env untouched-by-default and restored afterward."""
     with mock.patch.dict(os.environ):
         for var in ("COMMS_LLM_COMPOSER", "COMMS_LLM_MODEL", "COMMS_LLM_TIMEOUT_SECONDS",
-                    "GEMINI_API_KEY"):
+                    "GEMINI_API_KEY", "COMMS_LLM_BASE_URL", "COMMS_LLM_API_KEY",
+                    "COMMS_LLM_ALLOW_INSECURE"):
             os.environ.pop(var, None)
         yield
 
@@ -281,3 +282,163 @@ async def test_model_name_with_path_characters_falls_back_without_a_request():
     assert await composer.compose_notification(
         acr_category="Cat1", finding="aortic dissection", ack_minutes=60) is None
     assert _FakeClient.requests == []
+
+
+# --- OpenAI-compatible backend: the #77 local-hosting path ------------------------------
+
+def _local(base_url: str = "http://127.0.0.1:11434/v1", model: str = "qwen2.5:7b"):
+    """Flag on, pointed at a local OpenAI-compatible endpoint. Deliberately NO Gemini key: the
+    whole point of this backend is that it reaches a model without one."""
+    os.environ["COMMS_LLM_COMPOSER"] = "1"
+    os.environ["COMMS_LLM_BASE_URL"] = base_url
+    os.environ["COMMS_LLM_MODEL"] = model
+    _FakeClient.response_body = {"choices": [{"message": {"content": COMPOSED}}]}
+
+
+async def test_a_local_model_composes_with_no_gemini_key_at_all():
+    """The reason this backend exists: #77 chose local open-weights, and the Gemini key check was
+    the gate that made 'local' unreachable."""
+    _local()
+    assert os.environ.get("GEMINI_API_KEY") is None
+    out = await composer.compose_notification(
+        acr_category="Cat1", finding="aortic dissection", ack_minutes=60)
+    assert out == COMPOSED
+
+
+async def test_the_request_is_openai_shaped_and_never_touches_gemini():
+    _local()
+    await composer.compose_notification(
+        acr_category="Cat1", finding="aortic dissection", ack_minutes=60)
+    (req,) = _FakeClient.requests
+    assert req["url"] == "http://127.0.0.1:11434/v1/chat/completions"
+    assert "googleapis.com" not in req["url"]
+    assert req["json"]["model"] == "qwen2.5:7b"
+    assert req["json"]["messages"][0]["content"].count("Cat1") >= 1
+
+
+async def test_a_model_name_with_a_colon_is_accepted_here():
+    """The Gemini path's URL-safety regex rejects 'qwen2.5:7b'. Applying it to a JSON body field
+    would silently fall back on exactly the models this backend exists to reach."""
+    _local(model="qwen2.5:7b")
+    assert await composer.compose_notification(
+        acr_category="Cat1", finding="aortic dissection", ack_minutes=60) == COMPOSED
+    assert _FakeClient.requests[0]["json"]["model"] == "qwen2.5:7b"
+
+
+async def test_an_optional_key_rides_authorization_and_never_the_url():
+    _local(base_url="https://llm.internal/v1")
+    os.environ["COMMS_LLM_API_KEY"] = "k-secret"
+    await composer.compose_notification(
+        acr_category="Cat1", finding="aortic dissection", ack_minutes=60)
+    (req,) = _FakeClient.requests
+    assert req["headers"]["Authorization"] == "Bearer k-secret"
+    assert "k-secret" not in req["url"]
+
+
+async def test_no_key_sends_no_authorization_header():
+    _local()
+    await composer.compose_notification(
+        acr_category="Cat1", finding="aortic dissection", ack_minutes=60)
+    assert "Authorization" not in _FakeClient.requests[0]["headers"]
+
+
+async def test_a_base_url_without_a_model_falls_back_without_a_request():
+    """Half-set is a misconfiguration, not a request to guess: there is no sensible default model
+    for an arbitrary endpoint. It must NOT silently fall through to Gemini either."""
+    os.environ["COMMS_LLM_COMPOSER"] = "1"
+    os.environ["COMMS_LLM_BASE_URL"] = "http://127.0.0.1:11434/v1"
+    os.environ["GEMINI_API_KEY"] = "k-test"
+    assert await composer.compose_notification(
+        acr_category="Cat1", finding="aortic dissection", ack_minutes=60) is None
+    assert _FakeClient.requests == []
+
+
+# --- transport guard (mirrors llm_draft / fhir_client) ------------------------------------
+
+@pytest.mark.parametrize("base_url", [
+    "http://127.0.0.1:11434/v1",     # loopback plaintext: a local model
+    "http://localhost:11434/v1",
+    "https://llm.internal/v1",       # remote, but encrypted
+])
+async def test_a_safe_transport_needs_no_opt_in(base_url):
+    _local(base_url=base_url)
+    assert await composer.compose_notification(
+        acr_category="Cat1", finding="aortic dissection", ack_minutes=60) == COMPOSED
+
+
+async def test_plaintext_to_a_remote_host_is_refused_without_the_opt_in():
+    """From a container nothing on the docker host is loopback, so this is the case an operator
+    actually hits -- it must refuse rather than quietly ship a cohort-derived label on the wire."""
+    _local(base_url="http://host.docker.internal:11434/v1")
+    assert await composer.compose_notification(
+        acr_category="Cat1", finding="aortic dissection", ack_minutes=60) is None
+    assert _FakeClient.requests == []
+
+
+async def test_the_opt_in_releases_plaintext_to_a_remote_host():
+    _local(base_url="http://host.docker.internal:11434/v1")
+    os.environ["COMMS_LLM_ALLOW_INSECURE"] = "1"
+    assert await composer.compose_notification(
+        acr_category="Cat1", finding="aortic dissection", ack_minutes=60) == COMPOSED
+
+
+async def test_the_insecure_opt_in_uses_the_family_truthy_set():
+    """Byte-for-byte the family's set (!73 item 3): 'on' does not enable this one either."""
+    _local(base_url="http://host.docker.internal:11434/v1")
+    os.environ["COMMS_LLM_ALLOW_INSECURE"] = "on"
+    assert await composer.compose_notification(
+        acr_category="Cat1", finding="aortic dissection", ack_minutes=60) is None
+    assert _FakeClient.requests == []
+
+
+async def test_the_refusal_log_names_the_host_but_not_the_path(caplog):
+    _local(base_url="http://host.docker.internal:11434/v1/deployments/secret-name")
+    with caplog.at_level("WARNING"):
+        await composer.compose_notification(
+            acr_category="Cat1", finding="aortic dissection", ack_minutes=60)
+    logged = caplog.text
+    assert "host.docker.internal" in logged and "secret-name" not in logged
+
+
+# --- the shared acceptance checks apply on BOTH backends ----------------------------------
+
+@pytest.mark.parametrize("break_it", ["timeout", "http_error", "malformed", "empty_text"])
+async def test_every_failure_mode_is_none_on_the_local_backend_too(break_it):
+    _local()
+    if break_it == "timeout":
+        _FakeClient.error = TimeoutError("deadline")
+    elif break_it == "http_error":
+        _FakeClient.status_error = True
+    elif break_it == "malformed":
+        _FakeClient.response_body = {"choices": []}
+    elif break_it == "empty_text":
+        _FakeClient.response_body = {"choices": [{"message": {"content": "  \n"}}]}
+    assert await composer.compose_notification(
+        acr_category="Cat1", finding="aortic dissection", ack_minutes=60) is None
+
+
+async def test_the_local_backend_cannot_contradict_the_decided_category_either():
+    _local()
+    _FakeClient.response_body = {
+        "choices": [{"message": {"content": COMPOSED.replace("Cat1", "Cat3")}}]}
+    assert await composer.compose_notification(
+        acr_category="Cat1", finding="aortic dissection", ack_minutes=60) is None
+
+
+async def test_the_flag_still_gates_the_local_backend():
+    """Base URL + model set, flag absent: the FLAG remains the only switch."""
+    os.environ["COMMS_LLM_BASE_URL"] = "http://127.0.0.1:11434/v1"
+    os.environ["COMMS_LLM_MODEL"] = "qwen2.5:7b"
+    assert await composer.compose_notification(
+        acr_category="Cat1", finding="aortic dissection", ack_minutes=60) is None
+    assert _FakeClient.requests == []
+
+
+async def test_the_local_prompt_is_lean_reference_only():
+    _local()
+    await composer.compose_notification(
+        acr_category="Cat1", finding="aortic dissection", ack_minutes=60)
+    prompt = json.dumps(_FakeClient.requests[0]["json"])
+    assert "aortic dissection" in prompt and "Cat1" in prompt and "60" in prompt
+    for phi_shaped in ("Patient/", "ServiceRequest/", "wf_test", "1.2.3"):
+        assert phi_shaped not in prompt
