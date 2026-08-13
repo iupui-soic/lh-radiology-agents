@@ -7,6 +7,7 @@ _REGISTRY: dict[str, dict[str, list[str]]] = {
         "chest":   ["lung-nodule-detect", "pe-detect"],
         "head":    ["ich-detect", "stroke-detect"],
         "abdomen": ["liver-lesion-detect"],
+        "pelvis":  ["pelvic-fracture-detect"],
         "spine":   ["vertebral-fracture-detect"],
         "aorta":   ["aortic-dissection-detect"],
         "*":       ["generic-ct-screen"],
@@ -15,6 +16,8 @@ _REGISTRY: dict[str, dict[str, list[str]]] = {
         "brain":   ["brain-tumor-screen", "ms-lesion-detect"],
         "spine":   ["cord-compression-detect"],
         "breast":  ["breast-mri-screen"],
+        "knee":    ["knee-mri-screen"],
+        "shoulder": ["shoulder-mri-screen"],
         "*":       ["generic-mr-screen"],
     },
     "CR": {
@@ -30,7 +33,24 @@ _REGISTRY: dict[str, dict[str, list[str]]] = {
     },
     "US": {
         "abdomen": ["gallstone-detect"],
+        "thyroid": ["thyroid-nodule-detect"],
+        "pelvis":  ["pelvic-us-screen"],
         "*":       ["generic-us-screen"],
+    },
+    "PT": {
+        "whole body": ["fdg-uptake-screen"],
+        "brain":      ["brain-pet-screen"],
+        "*":          ["generic-pet-screen"],
+    },
+    "NM": {
+        "bone":       ["bone-scan-screen"],
+        "myocardial": ["myocardial-perfusion-screen"],
+        "*":          ["generic-nm-screen"],
+    },
+    "XA": {
+        "coronary": ["coronary-stenosis-detect"],
+        "cerebral": ["cerebral-aneurysm-detect"],
+        "*":        ["generic-xa-screen"],
     },
 }
 
@@ -46,10 +66,8 @@ _REGISTRY: dict[str, dict[str, list[str]]] = {
 # Keyed by REGION, not by modality, on purpose: CT calls it "head" and MR calls it "brain", so each
 # is the other's alias and a `CT BRAIN` / `MRI HEAD` both land correctly.
 #
-# Only regions the registry ALREADY has are listed. Adding NEW modalities and regions (PT, NM, XA,
-# US thyroid, ...) is coverage work and belongs to #45; this is a selection-correctness fix, and
-# keeping `_REGISTRY` itself byte-for-byte unchanged means #45's data expansion merges cleanly on
-# top of it.
+# Only regions that need department-specific synonyms are listed. Registry keys without aliases
+# still match their literal name in a study description.
 _REGION_ALIASES: dict[str, tuple[str, ...]] = {
     "chest":   ("cxr", "ctpa", "thorax", "lung", "lungs", "pulmonary"),
     "head":    ("brain", "cerebral", "cranial", "circle of willis"),
