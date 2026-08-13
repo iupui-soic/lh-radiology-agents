@@ -18,11 +18,11 @@ _REGISTRY: dict[str, dict[str, list[str]]] = {
         "*":       ["generic-mr-screen"],
     },
     "CR": {
-        "chest":   ["cxr-screen", "pneumothorax-detect"],
+        "chest":   ["cxr-screen", "pneumothorax-detect", "effusion-detect"],
         "*":       ["generic-xr-screen"],
     },
     "DX": {
-        "chest":   ["cxr-screen", "pneumothorax-detect"],
+        "chest":   ["cxr-screen", "pneumothorax-detect", "effusion-detect"],
         "*":       ["generic-xr-screen"],
     },
     "MG": {

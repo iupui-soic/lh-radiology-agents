@@ -44,7 +44,7 @@ from registry import select_tools
 
 log = logging.getLogger(__name__)
 
-AGENT_VERSION = "0.4.0"
+AGENT_VERSION = "0.5.0"
 
 # Is this image built with the pixel/model extras? Decided ONCE, at import, by whether the imports
 # succeed -- not discovered over the network mid-study. cxr_model imports torch eagerly for exactly
@@ -100,9 +100,16 @@ POSITIVE_THRESHOLD = float(os.environ.get("CXR_POSITIVE_THRESHOLD") or "0.5")
 #     all of I26 is pulmonary embolism, so the prefix can't over-match). "O882" (dot-normalised
 #     O88.2, obstetric thromboembolism) stays a 4-char prefix rather than the 3-char "O88"
 #     family, because O88 also covers air/amniotic-fluid/septic embolism, which are not PE.
+#   - effusion-detect: "J90" (pleural effusion NEC -- the family is only pleural effusion) and
+#     "J91" (pleural effusion in conditions classified elsewhere: J91.0 malignant, J91.8 other --
+#     again wholly pleural effusion, so the prefix can't over-match). J94 (other pleural
+#     conditions, e.g. chylous effusion, hemothorax) is deliberately NOT matched: the family is
+#     not all effusion, and over-narrow beats over-broad here (same doctrine as the registry's
+#     TAVR exclusion).
 _REASON_CODE_RULES: dict[str, tuple[tuple[str, ...], str]] = {
     "pneumothorax-detect": (("J93", "S270XXA", "J95811"), "pneumothorax"),
     "pe-detect": (("I26", "O882"), "pulmonary embolism"),
+    "effusion-detect": (("J90", "J91"), "pleural effusion"),
 }
 
 
@@ -183,6 +190,12 @@ def _overall_status(statuses: list[str]) -> str:
 # row, not code.
 _PIXEL_TOOL_SPECS: dict[str, dict[str, str]] = {
     "pneumothorax-detect": {"head": "Pneumothorax", "display": "Pneumothorax"},
+    # The second row, and the first NON-CRITICAL one: "effusion" is deliberately NOT on
+    # impression-generation's critical-keyword list, so a positive here surfaces on the worklist,
+    # in OHIF, and in the pre-sign draft text -- but never trips a criticalFlag, so it cannot page
+    # anyone or escalate sign-off. The display name says "Pleural effusion" (what the head means
+    # clinically); the head is spelled exactly as TorchXRayVision names it in model.pathologies.
+    "effusion-detect": {"head": "Effusion", "display": "Pleural effusion"},
 }
 
 # The set view of the table, for the audit path (_tool_version): pixel tools are exactly its rows.
