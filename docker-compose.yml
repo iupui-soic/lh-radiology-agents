@@ -25,6 +25,8 @@ x-otel-env: &otel-env
 services:
   # --- EHR / RIS: OpenMRS 3 backend + legacyui + lh-radiology --------------------
   openmrs:
+    # A host reboot must not silently take the service down (the 2026-08-11 outage).
+    restart: unless-stopped
     # o3 reference-application backend with the LibreHealth Radiology module baked in.
     # HOW OTHER DEVS GET THIS IMAGE: the lh-radiology CI builds docker/o3/Dockerfile and pushes
     # it to the project's PUBLIC GitLab Container Registry on every o3-branch pipeline, so you
@@ -103,6 +105,8 @@ services:
       start_period: 180s     # Liquibase + concept-dictionary import + module startup
 
   mariadb:
+    # A host reboot must not silently take the service down (the 2026-08-11 outage).
+    restart: unless-stopped
     image: mariadb:10.11@sha256:5a5c675881ef3fd1c1da9b0a3bfd6ee82edbe39cd9e32e06be18034c37235e0e   # pinned (#72)
     environment:
       MARIADB_ROOT_PASSWORD: openmrs
@@ -235,6 +239,8 @@ services:
 
   # --- Temporal (durable orchestration engine, for the agent system) ------------
   temporal:
+    # A host reboot must not silently take the service down (the 2026-08-11 outage).
+    restart: unless-stopped
     image: temporalio/auto-setup:1.24.2@sha256:10e8c557ace5fa4aa99217637e7b9969316e89b929a3bfb117853a5417eef25c   # pinned to digest (#72)
     ports: ["7233:7233"]
     environment:
@@ -246,6 +252,8 @@ services:
     depends_on: [temporal-postgresql]
 
   temporal-postgresql:
+    # A host reboot must not silently take the service down (the 2026-08-11 outage).
+    restart: unless-stopped
     image: postgres:16@sha256:fe03a7605299a34ddf5e4f285dff78c3d7190a576b3c6b46f2fcff69f4bffd54   # pinned (#72)
     environment:
       POSTGRES_USER: temporal
@@ -253,6 +261,8 @@ services:
     volumes: ["temporal-pg-data:/var/lib/postgresql/data"]
 
   temporal-ui:
+    # A host reboot must not silently take the service down (the 2026-08-11 outage).
+    restart: unless-stopped
     image: temporalio/ui:2.30.1@sha256:1833a44628b7866a139f81bd1bdd1e568f22de0999bbf5b7f52645faa82043c7   # pinned to digest (#72)
     ports: ["8088:8080"]
     environment:
@@ -345,6 +355,8 @@ services:
   # `otel` profile, so the default stack is byte-for-byte unchanged. 4318 = OTLP/HTTP, which is
   # what init_tracing()'s exporter speaks (opentelemetry.exporter.otlp.proto.http).
   jaeger:
+    # A host reboot must not silently take the service down (the 2026-08-11 outage).
+    restart: unless-stopped
     # Explicit version (acceptable per #72): opt-in via the `otel` profile, so it is not in the
     # default demo path. Digest-pin this too if the showcase ever runs with tracing on.
     image: jaegertracing/all-in-one:1.62.0
@@ -425,6 +437,8 @@ services:
     depends_on: [temporal, openmrs, orthanc]
 
   worklist-triage:
+    # A host reboot must not silently take the service down (the 2026-08-11 outage).
+    restart: unless-stopped
     image: registry.gitlab.com/librehealth/radiology/lh-radiology-agents/worklist-triage:${APP_IMAGE_TAG:-main}
     build: { context: ., dockerfile: agents/worklist-triage/Dockerfile }
     ports: ["8101:8101"]
@@ -434,6 +448,8 @@ services:
   # needs the same credentials as the orchestrator (#53); without them every read 401s and the
   # whole EHR context packet silently degrades to empty.
   ehr-assistant:
+    # A host reboot must not silently take the service down (the 2026-08-11 outage).
+    restart: unless-stopped
     image: registry.gitlab.com/librehealth/radiology/lh-radiology-agents/ehr-assistant:${APP_IMAGE_TAG:-main}
     build: { context: ., dockerfile: agents/ehr-assistant/Dockerfile }
     ports: ["8102:8102"]
@@ -447,6 +463,8 @@ services:
       # https FHIR2_BASE_URL instead). READ, not WRITE: this service never writes.
       FHIR2_ALLOW_INSECURE_READ: "1"
   interpretation-assistant:
+    # A host reboot must not silently take the service down (the 2026-08-11 outage).
+    restart: unless-stopped
     image: registry.gitlab.com/librehealth/radiology/lh-radiology-agents/interpretation-assistant:${APP_IMAGE_TAG:-main}
     build: { context: ., dockerfile: agents/interpretation-assistant/Dockerfile }
     ports: ["8103:8103"]
@@ -460,6 +478,8 @@ services:
   # credentials as the orchestrator (#53) — without them every fetch 401s and silently degrades
   # to "no critical detection".
   impression-generation:
+    # A host reboot must not silently take the service down (the 2026-08-11 outage).
+    restart: unless-stopped
     image: registry.gitlab.com/librehealth/radiology/lh-radiology-agents/impression-generation:${APP_IMAGE_TAG:-main}
     build: { context: ., dockerfile: agents/impression-generation/Dockerfile }
     ports: ["8104:8104"]
@@ -491,6 +511,8 @@ services:
   # report.body (laterality, sections, BI-RADS, density) for the PI rules — same credentials as
   # impression-generation; without them every fetch 401s and the body rules silently stay inert.
   report-verification:
+    # A host reboot must not silently take the service down (the 2026-08-11 outage).
+    restart: unless-stopped
     image: registry.gitlab.com/librehealth/radiology/lh-radiology-agents/report-verification:${APP_IMAGE_TAG:-main}
     build: { context: ., dockerfile: agents/report-verification/Dockerfile }
     ports: ["8105:8105"]
