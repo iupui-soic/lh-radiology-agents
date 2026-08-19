@@ -58,9 +58,49 @@ def test_unknown_modality_returns_empty():
     tools = select_tools("XY", "UNKNOWN STUDY")
     assert tools == []
 
+@pytest.mark.parametrize("modality,description,expected", [
+    ("PT", "PET CT WHOLE BODY FDG", ["fdg-uptake-screen"]),
+    ("NM", "NM BONE SCAN", ["bone-scan-screen"]),
+    ("XA", "XA CORONARY ANGIOGRAM", ["coronary-stenosis-detect"]),
+])
+def test_new_modalities_select_regional_tools(modality, description, expected):
+    assert select_tools(modality, description) == expected
+
+
+@pytest.mark.parametrize("modality,description,expected", [
+    ("CT", "CT PELVIS W CONTRAST", ["pelvic-fracture-detect"]),
+    ("MR", "MR KNEE W/O CONTRAST", ["knee-mri-screen"]),
+    ("MR", "MR SHOULDER W/O CONTRAST", ["shoulder-mri-screen"]),
+    ("US", "US THYROID", ["thyroid-nodule-detect"]),
+    ("US", "US PELVIS", ["pelvic-us-screen"]),
+])
+def test_new_regions_select_regional_tools(modality, description, expected):
+    assert select_tools(modality, description) == expected
+
+
+@pytest.mark.parametrize("modality,expected", [
+    ("CT", ["generic-ct-screen"]),
+    ("MR", ["generic-mr-screen"]),
+    ("CR", ["generic-xr-screen"]),
+    ("DX", ["generic-xr-screen"]),
+    ("MG", ["mammo-screen"]),
+    ("US", ["generic-us-screen"]),
+    ("PT", ["generic-pet-screen"]),
+    ("NM", ["generic-nm-screen"]),
+    ("XA", ["generic-xa-screen"]),
+])
+def test_every_registered_modality_has_a_fallback(modality, expected):
+    assert select_tools(modality, "MISC RESEARCH PROTOCOL") == expected
+
+
 def test_ct_multi_region_collects_all_matching_regions():
     tools = select_tools("CT", "CT CHEST ABDOMEN PELVIS")
-    assert tools == ["lung-nodule-detect", "pe-detect", "liver-lesion-detect"]
+    assert tools == [
+        "lung-nodule-detect",
+        "pe-detect",
+        "liver-lesion-detect",
+        "pelvic-fracture-detect",
+    ]
 
 def test_ct_no_region_match_falls_back_to_star():
     tools = select_tools("CT", "CT MISC PROTOCOL")
@@ -251,7 +291,7 @@ async def test_pneumothorax_other_intrathoracic_injury_code_stays_unmatched():
     ("MR", "MRI HEAD WITHOUT CONTRAST",  ["brain-tumor-screen", "ms-lesion-detect"]),
     ("MR", "MR CEREBRAL ANGIOGRAM",      ["brain-tumor-screen", "ms-lesion-detect"]),
     # abbreviations
-    ("CT", "CT ABD PELVIS",              ["liver-lesion-detect"]),
+    ("CT", "CT ABD PELVIS",              ["liver-lesion-detect", "pelvic-fracture-detect"]),
     ("CT", "CT ANGIO AORTIC ARCH",       ["aortic-dissection-detect"]),
     ("CR", "CXR",                        ["cxr-screen", "pneumothorax-detect", "effusion-detect"]),
     ("CR", "CXR PORTABLE",               ["cxr-screen", "pneumothorax-detect", "effusion-detect"]),
@@ -347,7 +387,9 @@ def test_a_region_named_but_not_the_subject_does_not_select_its_tools(modality, 
     # a bone named ELSEWHERE in the description (not adjacent to "head") must NOT suppress the
     # brain region: a polytrauma head CT that also scans a long bone is a real brain scan and must
     # keep ich-detect. Excluding on any bone anywhere silently dropped hemorrhage screening here.
-    ("CT", "CT HEAD ABDOMEN PELVIS FEMUR", ["ich-detect", "stroke-detect", "liver-lesion-detect"]),
+    ("CT", "CT HEAD ABDOMEN PELVIS FEMUR", [
+        "ich-detect", "stroke-detect", "liver-lesion-detect", "pelvic-fracture-detect",
+    ]),
     ("CT", "CT HEAD AND FEMUR TRAUMA",     ["ich-detect", "stroke-detect"]),
     ("CT", "CT BRAIN AND SHOULDER",        ["ich-detect", "stroke-detect"]),
     # a dedicated aortic-root study keeps the dissection screen (#64, PI ruling: a type-A
