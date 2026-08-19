@@ -248,16 +248,15 @@ def test_handle_iterates_findings_and_writes_for_each_eligible_one(monkeypatch):
     # without side effects, so the wiring block's guard passes and the loop runs.
     monkeypatch.setattr(handler, "OrthancClient", lambda *a, **kw: object())
 
-    async def _fake_pixel_finding(tool_id, ctx):
-        if tool_id == "a":
-            return {
-                "toolId": "a", "label": "Pneumothorax", "confidence": 0.9,
-                "evidenceRef": f"orthanc:instance/{_ORTHANC_INSTANCE_ID}",
-                "status": "COMPLETE",
-            }
-        return None  # b: falls through to reason rule, which won't hit, then stub
+    # "a" is a pixel-tool row whose (faked) shared scoring pass came back positive -> a COMPLETE
+    # with an orthanc:instance/ evidenceRef via the real _head_finding; "b" is in no table ->
+    # falls through to the reason rules (no hit), then a bare stub.
+    monkeypatch.setattr(handler, "_PIXEL_TOOL_SPECS", {"a": {"head": "A", "display": "A"}})
 
-    monkeypatch.setattr(handler, "_pixel_finding", _fake_pixel_finding)
+    async def _fake_score_study(ctx):
+        return ("scored", {"A": 0.9}, _ORTHANC_INSTANCE_ID)
+
+    monkeypatch.setattr(handler, "_score_study", _fake_score_study)
 
     # Capture the wiring calls without hitting Orthanc.
     calls: list[dict] = []

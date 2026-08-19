@@ -97,7 +97,7 @@ async def test_a_negative_screen_is_stubbed_not_complete_so_normals_stay_inert(m
     every normal patient's chart ahead of the read. So a below-threshold pneumothorax reports
     STUBBED -- the model ran (evidenceRef + version prove it), it just offers no draft.
 
-    Flip the `>=` branch in _pneumothorax_finding to always return COMPLETE and this fails."""
+    Flip the `>=` branch in _head_finding to always return COMPLETE and this fails."""
     _pixels_on(monkeypatch, pneumothorax_p=0.12)
     out = await handle("interpretation.runTools", {"studyContext": CXR_CONTEXT})
     f = _ptx(out)
