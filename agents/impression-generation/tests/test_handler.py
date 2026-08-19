@@ -225,6 +225,63 @@ async def test_llm_unset_by_default_produces_template_text():
     assert out["recommendations"] == [{"text": "Routine follow-up as clinically indicated."}]
 
 
+async def test_a_noncritical_complete_finding_never_drafts_the_constant_negative():
+    """The first NON-critical screening head (interpretation's effusion-detect) exposes a latent
+    coupling: the template keyed only on criticalFlags, so a COMPLETE finding whose label carries
+    no critical keyword fell through to "No acute findings identified" -- a plainly false draft
+    for a study a model just flagged, and pre-sign that text is WRITTEN to the chart. The
+    template must recite the screening labels instead. Criticality is untouched: flags stay
+    empty, nothing pages, sign-off does not escalate."""
+    ai_findings = {"findings": [{
+        "toolId": "effusion-detect",
+        "label": "Pleural effusion (screening p=0.83); screening signal only, not a read",
+        "status": "COMPLETE",
+    }]}
+    out = await handle(
+        "impression.generate", {"studyContext": SAMPLE_CONTEXT, "aiFindings": ai_findings}
+    )
+    validate_skill_output("impression.generate", out)
+    assert "No acute findings" not in out["impressionText"]
+    assert "Pleural effusion" in out["impressionText"]
+    assert out["criticalFlags"] == []
+    assert out["structuredFindings"] == []
+    assert out["recommendations"] == [{"text": "Clinical correlation recommended."}]
+
+
+async def test_critical_flags_still_outrank_the_screening_recital():
+    """A pneumothorax WITH an effusion drafts the critical template, not the recital -- the
+    urgent wording must never be diluted by a co-occurring non-critical screen."""
+    ai_findings = {"findings": [
+        {"toolId": "pneumothorax-detect",
+         "label": "Pneumothorax (screening p=0.87); screening signal only, not a read",
+         "status": "COMPLETE"},
+        {"toolId": "effusion-detect",
+         "label": "Pleural effusion (screening p=0.83); screening signal only, not a read",
+         "status": "COMPLETE"},
+    ]}
+    out = await handle(
+        "impression.generate", {"studyContext": SAMPLE_CONTEXT, "aiFindings": ai_findings}
+    )
+    assert out["impressionText"].startswith("Findings are consistent with pneumothorax")
+    assert out["criticalFlags"] == [{"label": "pneumothorax", "severity": "critical"}]
+
+
+async def test_stubbed_labels_do_not_trigger_the_screening_recital():
+    """Only COMPLETE labels assert findings (#26): a STUBBED negative or a referral-code label
+    must not be recited as if a model had flagged it -- the constant negative stays correct for
+    a study where nothing COMPLETE exists."""
+    ai_findings = {"findings": [
+        {"toolId": "effusion-detect",
+         "label": "Pleural effusion screening negative (p=0.12 < 0.5); model ran, no finding at "
+                  "threshold -- screening signal only, not a read",
+         "status": "STUBBED"},
+    ]}
+    out = await handle(
+        "impression.generate", {"studyContext": SAMPLE_CONTEXT, "aiFindings": ai_findings}
+    )
+    assert out["impressionText"] == "No acute findings identified. Clinical correlation recommended."
+
+
 async def test_llm_failure_degrades_to_template_output():
     # The issue's required failure-injection test: model down -> template output, read proceeds.
     async def _boom(**kwargs):
