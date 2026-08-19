@@ -38,6 +38,18 @@ origin the #75 Caddy overlay serves. Nothing else is reachable off-box.
    both read it, and verification fails closed when it is empty. The `/reading-api` base URL
    means the ack asks for a login rather than reusing the physician's OpenMRS session: see arc
    2 step 6 for why, and what to change if you want the one-click path.
+3a. LLM hosting decision (#77, recorded 2026-08-11): the impression-prose model is a **locally
+   hosted open-weights model on the demo host itself** — an OpenAI-chat-completions server
+   (Ollama or vLLM) reachable only from loopback / the compose-internal network, never a public
+   bind. A third-party cloud API is NOT authorized for this path: the request body carries
+   cohort report text and EHR context, which is MIMIC-CXR data under the PhysioNet DUA, and no
+   vendor review under PhysioNet's responsible-use-of-online-services conditions has been done.
+   `llm_draft.py` (!76) enforces the same posture at runtime — plaintext HTTP to a non-loopback
+   host is refused; `IMPRESSION_LLM_ALLOW_INSECURE=1` is sanctioned ONLY for the
+   compose-internal hop on a single-box deployment, where the traffic never leaves the docker
+   bridge. The model itself stays a config value (`IMPRESSION_LLM_BASE_URL` +
+   `IMPRESSION_LLM_MODEL`), so upgrading it is an env change, not a code change; unset keys
+   remain a legitimate mode — the deterministic template runs instead.
 4. Accounts: each radiologist has their own OpenMRS user; the referring-physician demo account
    password is known; the ack/override phone is on wifi that can reach the demo origin.
 4a. Referring-physician access (#85) is bootstrapped, not hand-built: the
