@@ -82,8 +82,7 @@ CritCom protocol format, with the category pre-decided. Invariants, all pinned i
 - `COMMS_LLM_COMPOSER` defaults **off** and is the only switch on either backend.
 - **Two backends, one behaviour.** Unset `COMMS_LLM_BASE_URL` → the Gemini path
   (`COMMS_LLM_MODEL` defaults `gemini-2.5-flash-lite`, `GEMINI_API_KEY` required). Set it → any
-  OpenAI-compatible `/chat/completions` endpoint, which is what makes the #77 hosting decision
-  (local open-weights, no third-party cloud) reachable at all; `COMMS_LLM_MODEL` is then required
+  OpenAI-compatible `/chat/completions` endpoint; `COMMS_LLM_MODEL` is then required
   (half-set warns and falls back — it never silently reverts to Gemini) and `COMMS_LLM_API_KEY` is
   optional, since a local model wants none.
 - Keys come from the operator's environment only — never a file, never a log line. `GEMINI_API_KEY`
