@@ -13,19 +13,21 @@ with `evidenceRef`, `overallStatus` STUBBED|COMPLETE|PARTIAL|ERROR). A `findings
 (region, severity, bbox) only by changing the schema in the same commit (golden rule 1).
 
 ## Three levels of reality (visible in the output, not implied)
-- **PIXELS — `pneumothorax-detect` (#71, slice of #27).** The first tool that actually reads the
-  image. It fetches pixels from Orthanc (read-only), runs a pretrained TorchXRayVision DenseNet-121
-  (`cxr_model.py`), and reads the model's **Pneumothorax** head. Reports `COMPLETE` on a positive
+- **PIXELS — the rows of `_PIXEL_TOOL_SPECS` (#71, slice of #27).** The tools that actually read
+  the image: `pneumothorax-detect` (the first, critical) and `effusion-detect` (the second, and
+  the first non-critical one). The study's pixels are fetched from Orthanc (read-only) and scored
+  by the shared pretrained TorchXRayVision DenseNet-121 (`cxr_model.py`) ONCE per call; each row
+  reads its own head from that single forward pass. A row reports `COMPLETE` on a positive
   screen, with a real `confidence` and `evidenceRef: orthanc:instance/<id>`.
 - **REFERRAL REASON — `pe-detect` (#27).** Cross-checks `order.reasonCode` (ICD-10 family prefix,
   dot-stripped, e.g. `"I26"`), not pixels. A genuine but narrow interim signal, not CAD, so it
   stays `STUBBED` with a plain-text `evidenceRef` (`order.reasonCode=I26.99`). Table-driven via
-  `_REASON_CODE_RULES`. **It is also the degrade path for `pneumothorax-detect`** when the pixel
+  `_REASON_CODE_RULES`. **It is also the degrade path for the pixel-tool rows** when the pixel
   read can't run (see below).
 - **STUBBED — everything else,** until it gets a real implementation. Version reads `stub-0`.
 
-## `pneumothorax-detect` behaviour (the state machine)
-- **Positive** (`Pneumothorax` p ≥ `POSITIVE_THRESHOLD`) → `COMPLETE`, confidence = p, label names
+## Pixel-tool behaviour (the state machine, one per `_PIXEL_TOOL_SPECS` row)
+- **Positive** (the row's head p ≥ `POSITIVE_THRESHOLD`) → `COMPLETE`, confidence = p, label names
   the pathology, `evidenceRef` = the scored instance.
 - **Negative** (p < threshold) → `STUBBED` — see "draft only on positives" below. The model *ran*
   (evidenceRef records the instance; `toolsSelected[].version` still reports the model id), it just
