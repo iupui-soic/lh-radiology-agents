@@ -10,7 +10,7 @@
     {
       "id": "interpretation.runTools",
       "name": "Run interpretation tools",
-      "description": "Selects tools by study type, runs them (pneumothorax-detect is a real pixel model; the rest are referral-reason rules or stubs), returns structured findings.",
+      "description": "Selects tools by study type, runs them (pneumothorax-detect and effusion-detect are real pixel-model heads; the rest are referral-reason rules or stubs), returns structured findings.",
       "tags": ["ai", "cad", "interpretation", "registry"]
     }
   ]

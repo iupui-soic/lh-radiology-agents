@@ -67,7 +67,10 @@ def _pixels_on(monkeypatch, *, pneumothorax_p):
     monkeypatch.setattr(handler, "PIXEL_TOOLING", True)
     monkeypatch.setattr(handler, "OrthancClient", lambda: _FakeOrthanc())
     monkeypatch.setattr(handler, "dicom_to_greyscale", lambda b: [[0, 1], [2, 3]])
-    monkeypatch.setattr(handler, "score", lambda arr: {"Pneumothorax": pneumothorax_p, "Nodule": 0.10})
+    # Effusion rides along at a quiet negative so the second spec row (effusion-detect, selected on
+    # every chest CR/DX) stays STUBBED and these tests keep describing pneumothorax-detect alone.
+    monkeypatch.setattr(handler, "score",
+                        lambda arr: {"Pneumothorax": pneumothorax_p, "Effusion": 0.10, "Nodule": 0.10})
 
 
 def _ptx(out):
