@@ -211,6 +211,19 @@ Pick a study with **no** COMPLETE finding for this arc: it then has no AI draft,
 
 ## 6. Reset between takes / sessions
 
+- **Capture the workflow result BEFORE you restage or terminate anything.** The evaluation
+  numbers come from the result payload (`scripts/mimic/showcase_metrics.py`), and terminating a
+  run to clean up throws that payload away: the arc 3 rehearsal on 2026-08-20 lost its
+  `signoffGate` record exactly that way, so the tally showed zero authenticated overrides on a
+  day one was performed. Dump each finished study first:
+
+  ```bash
+  docker exec <project>-temporal-1 temporal --address temporal:7233 \
+    workflow show -w <workflowId> -r <runId> -o json > run.json
+  ```
+
+  then take the `WorkflowExecutionCompleted` result out of it into the session's results
+  directory. A run that never completed (still at a gate, or terminated) has no payload at all.
 - **Never** `docker compose down` the OpenMRS stack mid-day (documented wedge).
 - Restage a study: `python scripts/mimic/report_seeder.py finalize <study_id>` for the
   flip-to-final rehearsal path; delete probe artifacts per the worked examples in the drills.
