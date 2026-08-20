@@ -659,7 +659,16 @@ def _override_form(workflow_id: str, sc: dict | None, notice: str = "") -> HTMLR
         "<p>Releasing does <strong>not</strong> re-verify the report: the study proceeds to "
         "communication carrying both the verification verdict and this acknowledgement, and "
         "your name and reason become part of the workflow's audit record.</p>"
-        f"<form method=\"post\" action=\"/signoff/{wf}/override\">"
+        # No `action`: the form posts back to the URL the page was SERVED from, whatever prefix
+        # that carried. An absolute "/signoff/{wf}/override" is the in-cluster path, and the one
+        # deployment that matters here does not use it -- the #75 Caddy overlay publishes this
+        # surface at /ingress/... and strips the prefix (`handle_path /ingress/*`). So the page
+        # loaded fine over the overlay while its POST went to /signoff/... on the viewer origin,
+        # fell through to OHIF's nginx, and came back 405: the one human step in the pipeline was
+        # broken in exactly the deployment a paged clinician uses. Found in the #76 arc 3
+        # rehearsal, 2026-08-20; #114 fixed the browser GET, and the POST was never exercised
+        # through the overlay. Relative keeps in-cluster, overlay and any future prefix working.
+        "<form method=\"post\">"
         "<p><label>Acknowledged by<br>"
         "<input name=\"acknowledgedBy\" required style=\"width:100%\" "
         "placeholder=\"your name or Practitioner reference\"></label></p>"
