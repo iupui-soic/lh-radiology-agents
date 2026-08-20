@@ -40,32 +40,66 @@ _log = logging.getLogger("radagent_common.openmrs_rest")
 _URGENCY_TO_PRIORITY = {"STAT": "stat", "ROUTINE": "routine", "ON_SCHEDULED_DATE": "routine"}
 
 
+def _is_icd10_source(name: Optional[str]) -> bool:
+    """Is this mapping source an ICD-10 one? Source names are dictionary conventions, not a spec
+    -- the live CIEL dictionary says "ICD-10-WHO" -- so normalise (upper, drop dashes/spaces) and
+    take any ICD10* source. That excludes "ICD-11-WHO" (normalises to ICD11...) and every non-ICD
+    source."""
+    return str(name or "").upper().replace("-", "").replace(" ", "").startswith("ICD10")
+
+
+def _mapping_display_code(mapping: dict) -> Optional[str]:
+    """`{"display": "ICD-10: J95.811"}` -> "J95.811", for an ICD-10 source only; else None.
+
+    This is the path that actually fires against a live OpenMRS. The REST layer does NOT
+    materialise the nested `conceptReferenceTerm` sub-resource inside a CUSTOM rep: asking for
+    `mappings:(conceptReferenceTerm:(code,conceptSource:(name)))` returns a bare
+    `{"resourceVersion": "1.9"}` per mapping, on the order AND on the concept itself, at every
+    rep depth tried (custom, default and full). The mapping's `display`, which every rep does
+    fill, carries the same two facts as "<source>: <code>". Verified on the demo host's o3
+    2026-08-20 while rehearsing #76: the concept genuinely holds a SAME-AS "ICD-10: J95.811"
+    mapping, and the nested rep returned nothing for all ten STAT studies.
+
+    Split on the FIRST ": " so a code containing a colon survives intact.
+    """
+    display = mapping.get("display")
+    if not isinstance(display, str) or ":" not in display:
+        return None
+    source, _, code = display.partition(":")
+    code = code.strip()
+    return code if _is_icd10_source(source) and code else None
+
+
 def _icd10_reason_codes(order_reason: Optional[dict]) -> list[str]:
     """The order reason Concept's ICD-10 codes, in mapping order, deduped -- or [].
 
     The module order reason is an OpenMRS Concept; what triage and the interpretation registry
     match on is the ICD-10 code (#81), so only the Concept's ICD-10 reference-term mappings
-    travel (lean-reference: the code, never the free-text reason). Source names are dictionary
-    conventions, not a spec -- the live CIEL dictionary says "ICD-10-WHO" -- so the filter
-    normalises (upper, drop dashes/spaces) and takes any ICD10* source, which excludes
-    "ICD-11-WHO" (normalises to ICD11...) and every non-ICD source. Malformed mapping shapes
-    from a live dictionary contribute nothing rather than raising: the resolver is best-effort
-    end to end, and a broken mapping must not cost the patient/order join.
+    travel (lean-reference: the code, never the free-text reason).
+
+    Two shapes are read, in this order per mapping: the structured `conceptReferenceTerm`, and
+    the mapping `display` (see `_mapping_display_code`). The structured term is preferred where a
+    deployment materialises it, but a live o3 never does inside a custom rep, so the display
+    fallback is what carries the codes in practice. Malformed mapping shapes from a live
+    dictionary contribute nothing rather than raising: the resolver is best-effort end to end,
+    and a broken mapping must not cost the patient/order join.
     """
     codes: list[str] = []
     for mapping in (order_reason or {}).get("mappings") or []:
         if not isinstance(mapping, dict):
             continue
-        term = mapping.get("conceptReferenceTerm") or {}
-        if not isinstance(term, dict):
-            continue
-        source = (term.get("conceptSource") or {})
-        name = source.get("name") if isinstance(source, dict) else None
-        normalised = str(name or "").upper().replace("-", "").replace(" ", "")
-        code = term.get("code")
-        if normalised.startswith("ICD10") and isinstance(code, str) and code.strip():
-            if code.strip() not in codes:
-                codes.append(code.strip())
+        code = None
+        term = mapping.get("conceptReferenceTerm")
+        if isinstance(term, dict):
+            source = term.get("conceptSource")
+            name = source.get("name") if isinstance(source, dict) else None
+            raw = term.get("code")
+            if _is_icd10_source(name) and isinstance(raw, str) and raw.strip():
+                code = raw.strip()
+        if code is None:
+            code = _mapping_display_code(mapping)
+        if code and code not in codes:
+            codes.append(code)
     return codes
 
 
@@ -148,8 +182,11 @@ class OpenmrsRestClient:
         # module can serve them. Any non-400 failure keeps its outage semantics (bubbles to the
         # caller's swallow, exactly as before).
         base_rep = "custom:(uuid,urgency,patient:(uuid))"
+        # `display` is what a live o3 actually fills for a mapping; the nested conceptReferenceTerm
+        # comes back empty in a custom rep (see _mapping_display_code). Ask for BOTH so a
+        # deployment that does materialise the structured term keeps using it.
         reason_rep = ("custom:(uuid,urgency,patient:(uuid),"
-                      "orderReason:(mappings:(conceptReferenceTerm:(code,conceptSource:(name)))))")
+                      "orderReason:(mappings:(display,conceptReferenceTerm:(code,conceptSource:(name)))))")
         try:
             bundle = await self._get(
                 "radiologyorder", {"accessionNumber": accession, "v": reason_rep})
