@@ -28,6 +28,7 @@ Contracts: contracts/skills/comms.{dispatch,checkAck,escalate}.schema.json
 from __future__ import annotations
 
 import logging
+import re
 
 from radagent_common.comms_ledger import CommsLedgerClient
 from radagent_common.fhir_client import Fhir2Client
@@ -212,6 +213,21 @@ async def _check_ack(payload: dict) -> dict:
     )
 
 
+# Every escalation rung prepends "[ESCALATED] " to the finding it pages with, and `_escalate`
+# reads that finding back off the PREVIOUS Communication. Unstripped, rung 2 pages
+# "[ESCALATED] [ESCALATED] pneumothorax" and it compounds from there -- seen live on the demo
+# host during the #76 arc 2 rehearsal, on the acknowledgement receipt a physician actually read.
+# The prefix is routing decoration, not part of the finding, so strip it back to the clinical
+# text before reusing it: the pager then carries exactly one marker however many rungs have
+# fired, and the chart entry carries none.
+_ESCALATED_PREFIX = re.compile(r"^(?:\s*\[ESCALATED\]\s*)+", re.IGNORECASE)
+
+
+def _plain_finding(finding: str) -> str:
+    """The clinical finding with any accumulated "[ESCALATED] " markers removed."""
+    return _ESCALATED_PREFIX.sub("", finding or "").strip()
+
+
 # --- comms.escalate -------------------------------------------------------------------
 
 async def _escalate(payload: dict) -> dict:
@@ -226,7 +242,7 @@ async def _escalate(payload: dict) -> dict:
         comm = await _ledger().get_communication(task.focus.reference.split("/")[-1])
         if comm.category and comm.category[0].coding:
             acr = comm.category[0].coding[0].code or acr
-        finding = comm.finding_summary or finding
+        finding = _plain_finding(comm.finding_summary) or finding
 
     result = await escalate_to_on_call(
         _ledger(),
