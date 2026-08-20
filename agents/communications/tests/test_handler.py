@@ -542,3 +542,78 @@ async def test_escalation_rung_never_writes_to_the_chart_even_when_enabled(store
     validate_skill_output("comms.dispatch", out)
     assert [c["channel"] for c in out["channelResults"]] == ["pager", "sms"]
     assert fhir.notifications_written == []
+
+
+# --- the escalated loop must be acknowledgeable (#123) -------------------------------------
+#
+# Found driving arc 2 in a browser: after a Cat1 escalation the chart entry still named the task
+# the escalation had just FAILED, and the escalated page's whole payload was "[ESCALATED]
+# <finding>" with no link. Between them, an escalated critical result could not be acknowledged
+# by anyone: the first recipient's link was dead and the second never got one.
+
+async def test_escalation_redelivers_the_chart_entry_naming_the_new_task(stores, monkeypatch):
+    """The chart entry is anchored on the accession, so escalating must UPDATE it to name the
+    LIVE ack task. Without this the physician's only link pointed at the failed one."""
+    monkeypatch.setenv("EHR_INBOX_WRITE_ENABLED", "1")
+    fhir, _ = stores
+    sent = await handle("comms.dispatch", {"studyContext": SAMPLE_CONTEXT, "impression": CRITICAL})
+    first = fhir.notifications_written[-1]
+    assert first["ack_task_id"] == sent["taskId"]
+
+    out = await handle("comms.escalate",
+                       {"studyContext": SAMPLE_CONTEXT, "taskId": sent["taskId"]})
+    validate_skill_output("comms.escalate", out)
+
+    assert len(fhir.notifications_written) == 2, "escalation must re-deliver to the chart"
+    latest = fhir.notifications_written[-1]
+    assert latest["ack_task_id"] == out["newTaskId"]    # the LIVE loop, not the failed one
+    assert latest["ack_task_id"] != sent["taskId"]
+    # same accession => write_critical_result_notification updates the entry in place
+    assert latest["accession"] == first["accession"]
+
+
+async def test_the_escalated_chart_entry_keeps_the_plain_finding(stores, monkeypatch):
+    """The Communication is prefixed "[ESCALATED] " for the pager. The chart entry is the record
+    of THIS critical result, one per accession, so rewriting its text every rung would churn the
+    patient's chart to say nothing new."""
+    monkeypatch.setenv("EHR_INBOX_WRITE_ENABLED", "1")
+    fhir, _ = stores
+    sent = await handle("comms.dispatch", {"studyContext": SAMPLE_CONTEXT, "impression": CRITICAL})
+    out = await handle("comms.escalate",
+                       {"studyContext": SAMPLE_CONTEXT, "taskId": sent["taskId"]})
+
+    escalated = [n for n in fhir.notifications_written if n["ack_task_id"] == out["newTaskId"]]
+    assert escalated, "no chart entry was written for the escalated task"
+    assert not escalated[-1]["finding"].startswith("[ESCALATED]")
+
+
+async def test_a_failed_escalation_writes_no_chart_entry(stores, monkeypatch):
+    """Nobody on call means no new loop, so there is no live task to point the chart at. Leave
+    the entry alone rather than blanking the link the physician still has."""
+    monkeypatch.setenv("EHR_INBOX_WRITE_ENABLED", "1")
+    fhir, ledger = stores
+    sent = await handle("comms.dispatch", {"studyContext": SAMPLE_CONTEXT, "impression": CRITICAL})
+    before = len(fhir.notifications_written)
+    ledger.on_call = None                       # empty directory
+
+    out = await handle("comms.escalate",
+                       {"studyContext": SAMPLE_CONTEXT, "taskId": sent["taskId"]})
+
+    assert out["escalated"] is False
+    assert len(fhir.notifications_written) == before
+
+
+async def test_a_chart_write_failure_never_costs_the_escalation(stores, monkeypatch):
+    """Best-effort, exactly like dispatch's: by this point the page and the ledger record exist,
+    so raising would fail the activity and Temporal would page on-call twice."""
+    monkeypatch.setenv("EHR_INBOX_WRITE_ENABLED", "1")
+    fhir, _ = stores
+    sent = await handle("comms.dispatch", {"studyContext": SAMPLE_CONTEXT, "impression": CRITICAL})
+    fhir.fail_notification_write = True
+
+    out = await handle("comms.escalate",
+                       {"studyContext": SAMPLE_CONTEXT, "taskId": sent["taskId"]})
+
+    validate_skill_output("comms.escalate", out)
+    assert out["escalated"] is True
+    assert out["newTaskId"]
