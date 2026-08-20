@@ -100,13 +100,19 @@ selection (real protocol aliases, ICD-10 family prefixes, bone-adjacency exclusi
 write path: the dedicated pre-sign draft concept (#55) is provisioned into o3 at stack startup by
 `docker/openmrs/bootstrap_presign_concept.py`, and the plaintext-write transport guard is merged
 (!57). **M4 (in progress) is the MIMIC-CXR radiologist showcase:** a hosted demo where radiologists
-and referring physicians work a ~100-study MIMIC-CXR cohort through the full pipeline. Landed so
-far: the cohort ETL (#68 core slices), the Communications agent as a compose service (#69), the
-first real CAD — a pneumothorax classifier behind `pneumothorax-detect` (#71; every other model
-stays stubbed behind the Interpretation tool registry) — and the `ris-sign-bridge` workaround for
-the o3 module's broken sign emit (d210810). The critical path now runs through the first live demo
-run's findings: #82 (RIS human sign-off broken end to end), #83 (the deployed agent image predates
-#71 — no torch, so the classifier never runs), the sign-bridge defect batch (#89–#93), TLS +
-least-privilege hosting (#75), and run-book rehearsals (#76). **M5 is the EMBED mammography
-flagship** after the demo (#31; mapping in `docs/embed-mammography-mapping.md`). Search `TODO(M3)`
-for open code markers; the full plan is the GitLab issue backlog.
+and referring physicians work a ~100-study MIMIC-CXR cohort through the full pipeline. Landed:
+the cohort ETL (#68 core slices), the Communications agent as a compose service (#69), two real
+CAD heads behind the pluggable `_PIXEL_TOOL_SPECS` table (`pneumothorax-detect` #71 and
+`effusion-detect`, the first non-critical one; every other model stays stubbed behind the
+Interpretation tool registry), LLM-authored impression prose on the #77 path, the
+`ris-sign-bridge` workaround for the o3 module's broken sign emit (d210810), TLS and
+least-privilege hosting (#75), CI-published images with pull-based host deploys (#97, #98), and
+the referring-physician role bootstrap (#85). The whole loop is proven live on the demo host:
+CAD to pre-sign draft to a real RIS sign to verification to ARCHIVED, then restaged.
+**The one remaining release gate is #76**, the run-book rehearsals (two seeded dry runs plus one
+live-signing dry run). M4 then ships as **v0.4.0**. The rest of the open M4 backlog (#27, #64,
+#80, #105, #115, #117, #118) is real work but does not gate the demo. Note that many M4-era
+issues (#82-#116) were filed with no milestone, so the M4 milestone view is not the full history.
+**M5 is the EMBED mammography flagship** after the demo (#31; mapping in
+`docs/embed-mammography-mapping.md`). Search `TODO(M3)` for open code markers; the full plan is
+the GitLab issue backlog.
