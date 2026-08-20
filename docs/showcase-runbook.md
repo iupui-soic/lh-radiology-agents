@@ -227,6 +227,24 @@ Pick a study with **no** COMPLETE finding for this arc: it then has no AI draft,
   then take the `WorkflowExecutionCompleted` result out of it into the session's results
   directory. A run that never completed (still at a gate, or terminated) has no payload at all.
 - **Never** `docker compose down` the OpenMRS stack mid-day (documented wedge).
+- **`docker compose run` on a one-shot RECREATES its `depends_on` services.** The bootstraps
+  (`presign-concept-bootstrap`, `referring-role-bootstrap`) both depend on `openmrs` and
+  `mariadb` being healthy, so `docker compose run --rm presign-concept-bootstrap` against a live
+  stack restarts the stateful set even when the `-f` chain is correct. Hit live on 2026-08-20:
+  the openmrs container was recreated and **the Lucene search index was destroyed**. Every
+  name/identifier search in the RIS then returned nothing while the worklist, the viewer, the
+  orders and the chart all still worked perfectly, which is what makes it dangerous. Use
+  whichever of these fits:
+
+  ```bash
+  $COMPOSE run --rm --no-deps presign-concept-bootstrap   # do not touch the dependencies
+  ```
+
+  or run the script through a container that is already up (the `ris-sign-bridge` ETL toolbox has
+  a python and the compose network). If you DO recreate openmrs, rebuild the index before anyone
+  searches: **Administration -> Maintenance -> Search Index -> Rebuild Search Index** (it reports
+  "Completed Rebuilding the Search Index" in about a minute), then verify with a real query,
+  `patient?q=<subject_id>`, and not by assuming. See also the recreate note further down.
 - Restage a study: `python scripts/mimic/report_seeder.py finalize <study_id>` for the
   flip-to-final rehearsal path; delete probe artifacts per the worked examples in the drills.
 - **`restage` is what makes a study re-readable, and it must be run before a second RIS sign.**
@@ -240,7 +258,11 @@ Pick a study with **no** COMPLETE finding for this arc: it then has no AI draft,
 - **After any `openmrs` container recreate, rebuild the Lucene search index** or every
   name/identifier search in the RIS (find patient, find provider) silently returns nothing,
   and an ETL re-run would duplicate the cohort (the REST q-search rides the same index).
-  Live-hit 2026-08-07. Fix: `DELETE FROM global_property WHERE property='search.indexVersion';`
+  Live-hit 2026-08-07, and again 2026-08-20 via `docker compose run` (see the warning above).
+  **Easiest fix, no SQL and no restart:** as `admin`, **Administration -> Maintenance -> Search
+  Index -> Rebuild Search Index**; it answers "Completed Rebuilding the Search Index" in about a
+  minute. That is the route used on 2026-08-20. Equivalent fix from the database:
+  `DELETE FROM global_property WHERE property='search.indexVersion';`
   then restart the container; core rebuilds the index at boot (~1 min warm) and re-stamps the
   property. Verify: `patient?q=<subject_id>` returns the patient.
 
@@ -253,9 +275,11 @@ the drift class behind #83 cannot recur. Only in an announced window, never mid-
 2. On the host (repo root). **Derive the `-f` chain, never type it from memory.** Every later
    compose command must carry the SAME chain the stack was started with: a command missing one
    overlay makes Compose see the affected service's config as changed, so it recreates it and
-   anything depending on it, which is how the OpenMRS volume wedge happens. This doc used to
-   hardcode a two-file chain while the demo host was actually running three (yml + tls + seed),
-   so running it verbatim would have recreated mariadb and openmrs mid-deploy. Read the real
+   anything depending on it, which is how the OpenMRS volume wedge happens. The chain is not the
+   only way to trigger that recreate: `docker compose run` on a one-shot does it through
+   `depends_on` even with the chain right, see §6. This doc used to hardcode a two-file chain
+   while the demo host was actually running three (yml + tls + seed), so running it verbatim
+   would have recreated mariadb and openmrs mid-deploy. Read the real
    chain off the running project and reuse it:
 
    ```bash
