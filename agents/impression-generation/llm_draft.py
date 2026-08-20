@@ -134,6 +134,29 @@ def _labels_as_text(finding_labels: str | list[str] | tuple[str, ...] | set[str]
     return " ".join(str(v) for v in finding_labels if v)
 
 
+def _finding_terms(finding_labels: str | list[str] | tuple[str, ...] | set[str]) -> list[str]:
+    """Canonical pathology term per COMPLETE finding label, deduped, for the assertion check.
+
+    A finding label reads "<Display> (screening p=0.65, raw 0.376 vs op 0.103); screening signal
+    only, not a read". Only the leading display phrase names a pathology; everything after the
+    first "(" is calibration detail no prose would ever repeat, so matching on the whole label
+    would reject every draft. Split there and keep the head.
+
+    Why this exists (found rehearsing #76 on the demo host, 2026-08-20): the prompt named only
+    CRITICAL findings as authoritative, and effusion-detect is the first non-critical producer.
+    A study whose only COMPLETE finding was a pleural effusion got the draft "No acute
+    cardiopulmonary abnormality." -- written to the chart pre-sign, contradicting the finding that
+    authorised the write. Reproduced on 5 of 5 effusion-only studies, one at p=0.77.
+    """
+    labels = [finding_labels] if isinstance(finding_labels, str) else list(finding_labels or [])
+    terms: list[str] = []
+    for label in labels:
+        head = str(label or "").split("(", 1)[0].strip().rstrip(".,;:").lower()
+        if head and head not in terms:
+            terms.append(head)
+    return terms
+
+
 def _summarize_ehr_context(ehr_context: dict) -> str:
     """An explicit allowlist -- never a blanket json.dumps(ehr_context). `contrastFlags` and
     `medicationFlags` are additionalProperties:true in contracts/skills/ehr.schema.json, so a raw
@@ -184,13 +207,25 @@ _SYSTEM_PROMPT = (
 )
 
 
-def _build_prompt(*, conclusion: str, labels_text: str, critical_flags: list[dict], ehr_summary: str) -> str:
+def _build_prompt(*, conclusion: str, labels_text: str, critical_flags: list[dict],
+                  finding_terms: list[str], ehr_summary: str) -> str:
     flag_labels = ", ".join(f["label"] for f in critical_flags if f.get("label")) or "none"
     lines = [
         f"Confirmed critical findings (authoritative, do not contradict): {flag_labels}",
+        # The non-critical half of the same fact. Without this line a confirmed pleural effusion
+        # arrived as unlabelled context under "critical findings: none" with no report conclusion,
+        # and the model reasonably concluded the study was normal (#76 rehearsal, 2026-08-20).
+        f"Confirmed AI screening findings (authoritative, do not contradict): "
+        f"{', '.join(finding_terms) or 'none'}",
         f"Report conclusion: {conclusion or '(none available)'}",
         f"AI finding labels: {labels_text or '(none)'}",
     ]
+    if finding_terms:
+        lines.append(
+            "At least one screening finding is confirmed, so the impression MUST name each of "
+            "them as present. Do NOT write that the study is normal, and do NOT negate a "
+            "confirmed finding."
+        )
     if ehr_summary:
         lines.append(ehr_summary)
     if critical_flags:
@@ -258,7 +293,8 @@ def _first_json_object(text: str) -> str:
     return text
 
 
-def _parse_draft(content: str, critical_flags: list[dict]) -> LLMDraft:
+def _parse_draft(content: str, critical_flags: list[dict],
+                 finding_terms: list[str] | None = None) -> LLMDraft:
     """Raises on anything unusable; draft_impression() turns every raise into a None."""
     parsed = json.loads(_first_json_object(content.strip()))
     impression_text = parsed["impressionText"]
@@ -304,6 +340,15 @@ def _parse_draft(content: str, critical_flags: list[dict]) -> LLMDraft:
         if missing:
             raise ValueError(
                 f"prose does not assert {len(missing)} of {len(flag_labels)} confirmed critical flag(s)")
+    # The same rule for a CONFIRMED NON-CRITICAL finding. Criticality decides whether anything
+    # pages; it does not decide whether the prose may contradict the model. A draft is only
+    # written when some finding is COMPLETE, so prose that asserts normality next to one is the
+    # reassuring-text-in-a-chart case, exactly as above -- and pre-sign it is written to the chart
+    # before a radiologist has looked. Same negation-aware matcher, same conservative bias: a
+    # reject costs the deterministic template, which recites the finding correctly.
+    for term in finding_terms or []:
+        if term not in set(find_asserted_terms(impression_text, [term])):
+            raise ValueError("prose does not assert a confirmed screening finding")
     return LLMDraft(
         impression_text=impression_text.strip(),
         recommendations=[r.strip() for r in recommendations],
@@ -372,15 +417,17 @@ async def draft_impression(
                 urlparse(base_url).hostname,
             )
 
+        finding_terms = _finding_terms(finding_labels)
         prompt = _build_prompt(
             conclusion=conclusion,
             labels_text=_labels_as_text(finding_labels),
             critical_flags=critical_flags,
+            finding_terms=finding_terms,
             ehr_summary=_summarize_ehr_context(ehr_context),
         )
         content = await _chat_completion(base_url, model, api_key, timeout, prompt)
         try:
-            return _parse_draft(content, critical_flags)
+            return _parse_draft(content, critical_flags, finding_terms)
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as first:
             # One retry, and only for a reply we could not use (#103). The model answered, so the
             # endpoint and the key are fine; it emitted a raw newline or an unescaped quote inside
@@ -395,7 +442,7 @@ async def draft_impression(
             _log.warning("impression LLM draft malformed: %s: %s; retrying once",
                          first.__class__.__name__, first)
             content = await _chat_completion(base_url, model, api_key, timeout, prompt)
-            return _parse_draft(content, critical_flags)
+            return _parse_draft(content, critical_flags, finding_terms)
     except (httpx.InvalidURL, httpx.UnsupportedProtocol) as e:
         _log.warning("impression LLM draft skipped: unusable IMPRESSION_LLM_BASE_URL (%s)", e.__class__.__name__)
     except httpx.HTTPStatusError as e:
