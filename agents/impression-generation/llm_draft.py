@@ -203,7 +203,17 @@ _SYSTEM_PROMPT = (
     # And the JSON itself has to survive json.loads: raw newlines and unescaped quotes inside the
     # string values were the other live failure ("Expecting ',' delimiter").
     "Both fields must be valid JSON strings: escape any double quote, and use no literal newlines "
-    "inside a string."
+    "inside a string. "
+    # The pair for _PLACEHOLDER (#117). !159 added the parser reject after a live run left
+    # "[patient name]" and "[insert context]" in 2 of 30 normal-case drafts; every other hard
+    # reject in _parse_draft already had a prompt clause, and that one did not. Asking costs
+    # nothing; re-asking costs a whole extra model call per leak, on the case (a normal study)
+    # that is most of a screening cohort. Named literally because the model writes these when it
+    # reaches for context it was never given -- the prompt carries no identifiers by design
+    # (golden rule 2), so there is nothing to fill in and nothing to leave a blank for.
+    "Never write a bracketed placeholder such as [patient name], [insert context] or [date]. "
+    "You have no patient identifiers and need none: state only what the text above supports, "
+    "and leave a detail out entirely rather than marking a blank to be filled in later."
 )
 
 
