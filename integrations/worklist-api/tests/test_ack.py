@@ -7,6 +7,10 @@ an already-closed loop is never re-written.
 from __future__ import annotations
 
 import httpx
+import html as html_mod
+import re
+from urllib.parse import urljoin
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -265,7 +269,44 @@ def test_the_confirm_page_button_posts_back_to_the_same_signed_link(rig):
 
     page = client.get("/ack/task-7", params={"sig": _sig()}).text
 
-    assert f"ack/task-7?sig={_sig()}" in page
+    assert f"sig={_sig()}" in page
+
+
+def _form_action(page: str) -> str:
+    m = re.search(r'<form[^>]*action="([^"]*)"', page)
+    assert m, "the confirm page must carry a form action"
+    return html_mod.unescape(m.group(1))
+
+
+@pytest.mark.parametrize("served_at", [
+    "http://host/ack/task-7",                 # in cluster
+    "http://host/reading-api/ack/task-7",     # behind the #75 Caddy overlay
+    "http://host/deep/prefix/ack/task-7",     # any other future prefix
+])
+def test_the_button_resolves_to_the_page_it_was_served_from(rig, served_at):
+    """THE regression. A relative "ack/<id>?sig=..." resolves against the page's base directory
+    (.../ack/), producing .../ack/ack/<id> -- a 404, so pressing Acknowledge silently did nothing
+    and the escalation clock kept running. Resolve the action the way a browser does and require
+    it to land back on the same path."""
+    client, _, _ = rig
+    client.cookies.set("JSESSIONID", "sess-live")
+    page = client.get("/ack/task-7", params={"sig": _sig()}).text
+
+    resolved = urljoin(served_at + f"?sig={_sig()}", _form_action(page))
+
+    assert resolved.split("?")[0] == served_at, f"POST would go to {resolved}"
+    assert f"sig={_sig()}" in resolved
+    assert "/ack/ack/" not in resolved
+
+
+def test_the_action_is_not_an_absolute_in_cluster_path(rig):
+    """An absolute "/ack/<id>" would fix the doubling and reintroduce #122: behind the overlay
+    the POST would leave the prefix and miss the route entirely."""
+    client, _, _ = rig
+    client.cookies.set("JSESSIONID", "sess-live")
+    page = client.get("/ack/task-7", params={"sig": _sig()}).text
+
+    assert not _form_action(page).startswith("/")
 
 
 def test_post_still_refuses_a_forged_signature_before_any_identity_work(rig):

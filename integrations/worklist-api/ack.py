@@ -128,7 +128,18 @@ def _confirm_page(task_id: str, sig: str, who: str, finding: str | None) -> HTML
 
     The button POSTs, which is the whole point of the split -- see `acknowledge` below.
     """
-    action = f"ack/{quote(task_id)}?sig={quote(sig)}"
+    # Query-only action: resolves against the page's OWN url, so it keeps the path whatever
+    # prefix served it and carries the signature forward.
+    #
+    # A relative "ack/<id>?sig=..." doubled the segment. The page lives at .../ack/<id>, whose
+    # base directory is .../ack/, so the browser resolved the action to .../ack/ack/<id> and the
+    # POST 404d -- in cluster AND behind the #75 overlay, so the acknowledgement was never
+    # completable through the button at all. Found in the #76 arc 2 rehearsal, 2026-08-20, by a
+    # referring physician pressing Acknowledge and nothing happening; the ledger Task stayed
+    # `requested` and the escalation clock kept running. Same shape as #122 on the sign-off
+    # override form, and the same blind spot: the tests POST the endpoint directly, so no test
+    # ever resolved the action the browser resolves.
+    action = f"?sig={quote(sig)}"
     return HTMLResponse(
         f"<!doctype html><html><head><meta name=\"viewport\" "
         f"content=\"width=device-width, initial-scale=1\">"
