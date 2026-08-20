@@ -93,7 +93,10 @@ def test_get_renders_the_form_with_the_verdict_and_never_issue_messages():
     r = _drive(FakeHandle())
     assert r.status_code == 200
     page = r.text
-    assert "<form" in page and f"action=\"/signoff/{WF}/override\"" in page
+    # No absolute action: the form must post back to whatever URL served it (see the
+    # prefix test below). Pinning "/signoff/..." here is what let the overlay bug ship.
+    assert "<form method=\"post\">" in page
+    assert "action=" not in page
     for field in ("acknowledgedBy", "reason", "token"):
         assert f"name=\"{field}\"" in page
     assert "WARN" in page and "critical_finding_unflagged" in page
@@ -204,3 +207,28 @@ def test_a_non_object_json_body_is_a_422_not_a_500():
     r = _drive(FakeHandle(), method="POST", json=["not", "a", "dict"],
                headers={"X-Signoff-Token": _TOKEN})
     assert r.status_code == 422
+
+
+# --- the form must survive a path prefix (#76 arc 3 rehearsal, 2026-08-20) --------------------
+
+def test_the_form_posts_to_its_own_url_so_a_path_prefix_survives():
+    """The page is published to phones through the #75 Caddy overlay at /ingress/..., which
+    STRIPS the prefix before proxying (`handle_path /ingress/*`). A form carrying the absolute
+    in-cluster action posted to /signoff/... on the viewer origin instead, fell through to OHIF's
+    nginx and came back 405 -- the one human step in the pipeline, broken in the only deployment
+    a paged clinician can reach. An action-less form posts to the current URL, so it works under
+    any prefix.
+    """
+    page = _drive(FakeHandle()).text
+    assert "<form method=\"post\">" in page
+    # the in-cluster path must not be baked in anywhere in the form
+    assert f"/signoff/{WF}/override" not in page
+
+
+def test_a_prefixed_post_reaches_the_same_handler_and_releases():
+    """What the overlay actually does: strip the prefix, then proxy. Prove the stripped path is
+    the one the app serves, so a POST that follows the form lands on the release endpoint."""
+    handle = FakeHandle()
+    r = _drive(handle, method="post", data=GOOD_FORM)
+    assert r.status_code == 200          # the HTML path renders a receipt; 202 is the JSON contract
+    assert handle.signals, "the form POST must reach the release endpoint and signal the workflow"
