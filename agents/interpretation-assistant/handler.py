@@ -44,7 +44,7 @@ from registry import select_tools
 
 log = logging.getLogger(__name__)
 
-AGENT_VERSION = "0.6.0"
+AGENT_VERSION = "0.7.0"
 
 # Is this image built with the pixel/model extras? Decided ONCE, at import, by whether the imports
 # succeed -- not discovered over the network mid-study. cxr_model imports torch eagerly for exactly

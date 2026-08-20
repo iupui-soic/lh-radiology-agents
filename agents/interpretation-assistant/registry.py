@@ -119,12 +119,102 @@ _MSK_JOINT_HEAD = re.compile(
 # A post-TAVR surveillance CT of the aorta is aorta imaging in a population that CAN dissect,
 # and excluding on "tavr" alone would silently remove its dissection screen. A wrong exclusion
 # deletes screening; over-narrow beats over-broad here.
-_TAVR_PLANNING = re.compile(r"\btavr[\s-]+planning\b")
+# The PI REVERSED the aortic-root half of the 2026-07-15 ruling on #64 (2026-08-06): "TAVR
+# planning and aortic-root CTs are valve and annulus sizing studies, ordered on a known workup,
+# not on suspicion of dissection. A screening detector firing there adds noise where a specialist
+# is already looking at the root." The earlier ruling kept the root matched because a type-A
+# dissection involves it; the reversal's point is that a dedicated root study is not ordered on
+# that question. The comment above still records the original reasoning, because knowing the call
+# was revisited matters more than a tidy file -- but the TAVR-only pattern it described is gone,
+# folded into the alternation below rather than left defined and referenced by nothing.
+#
+# The reversal's stated safety net does not exist, so do not rely on it. It was justified with
+# "if a dissection question is real the order carries it, and the reasonCode path selects the tool
+# anyway" -- that is not what the reasonCode path does. `aortic-dissection-detect` is not a key in
+# handler._REASON_CODE_RULES (only pneumothorax/pe/effusion are), and that path is a per-tool
+# ENRICHMENT loop over the tools this function already returned (handler.py `for tool in tools:`),
+# so it cannot add back a tool an exclusion removed. Verified by running it: an excluded
+# description carrying reasonCode I71.00 selects ['generic-ct-screen'] and nothing else. The same
+# is true of the TAVR exclusion that shipped before this one.
+#
+# So this exclusion SUBTRACTS a screen outright, with no fallback underneath it. The clinical call
+# is the PI's and stands; the point here is that the rescues below are the only thing keeping a
+# real dissection study screened, which is why they are not optional.
+#
+# THE RESCUES WERE ENUMERATED FROM A CORPUS, NOT BY INSPECTION. Three review rounds each found a
+# real hole by reading the pattern (TAVR planning, then post-operative roots, then acute aortic
+# syndrome and scan-range descriptions) and each round was still incomplete, so the last round was
+# done by writing down every way a department names a root study and running them. The corpus is
+# the test table below plus the corpus item on #64; extend BOTH when a new naming turns up.
+#
+# Each rescue is the over-narrow-beats-over-broad rule made literal, because a wrong exclusion
+# DELETES a screen while a wrong inclusion only adds noise:
+#
+#   1. "dissection" anywhere -- a study that says it is a dissection study is one whatever else it
+#      names, so "CT AORTIC ROOT DISSECTION PROTOCOL" keeps its screen.
+#   2. _AORTA_OPERATED -- a root that has been replaced, repaired, grafted or stented is
+#      surveillance in a population that can dissect, and at higher risk than an unoperated one
+#      (anastomotic pseudoaneurysm, new dissection at the suture line). This is the SAME reason
+#      `CT AORTA POST TAVR` keeps its screen, pinned in
+#      test_the_exclusions_do_not_cost_the_real_studies -- "the exclusion refuses a region; it must
+#      not refuse the studies the region exists for". Without this, `CT POST AORTIC ROOT REPAIR`
+#      lost its screen while `CT AORTA POST TAVR` kept one, which is the same clinical situation
+#      described two ways.
+#   3. _AORTA_ACUTE -- the rest of acute aortic syndrome. Intramural haematoma and penetrating
+#      ulcer are the other two thirds of the triad with dissection and are there BECAUSE they are
+#      hard to tell apart; rupture, transection and traumatic injury are a root that may be
+#      dissecting now; aneurysm/dilatation/ectasia are the substrate it arises in; abscess,
+#      endocarditis, aortitis and mycotic aneurysm destroy the wall the same way. "Ordered on a
+#      known workup, not on suspicion of dissection" -- the reversal's own test -- does not
+#      describe any of them.
+#   4. _AORTA_BEYOND_THE_ROOT -- the root is the SCAN RANGE and the aorta is the subject. Same trap
+#      as `head`, which is why _MSK_JOINT_HEAD matches an adjacency: "aortic root" appearing
+#      ANYWHERE is not evidence the study is about the root. `CTA THORACIC AORTA AORTIC ROOT` and
+#      `CTA AORTA AORTIC ROOT TO BIFURCATION` name a CTA's coverage, and the aorta they cover is
+#      exactly what the dissection screen is for. Named segments match as an adjacency
+#      (`thoracic aorta`, not a bare "thoracic" -- see the alias note above on `CT THORACIC SPINE`),
+#      so `CT ROOT OF AORTA` and `CT ROOT OF THE AORTA` still exclude.
+#
+# Rescues 1-3 apply to EVERY branch; rescue 4 applies only to the root branch, and that asymmetry
+# is load-bearing rather than tidiness. A real TAVR-planning CT covers the iliofemoral access run
+# and often the arch, so `CT AORTIC VALVE TAVR PLANNING WITH ILIOFEMORAL RUNOFF` names territory
+# beyond the root while being the exact study !82 already ruled out. Applying rescue 4 to it would
+# undo a shipped ruling on one of the commonest real protocol names. A study that DECLARES itself
+# planning is a sizing study whatever territory it covers; a study that merely names the root is a
+# sizing study only if it does not also name territory beyond the root. Pinned both ways below.
+#
+# The cues are deliberately specific ("post-op", not a bare "post") so a sizing study written as
+# `AORTIC ROOT POST CONTRAST` is not rescued by the word "post". Where they do over-rescue, that
+# is the safe direction: keeping a screen costs noise, losing one costs a finding.
+_AORTA_OPERATED = (
+    r"post[\s-]?op(?:erative)?|status\s+post|s/p|replacement|repair|\w*graft|stent|conduit"
+    r"|bentall|endoleak|prosthe(?:sis|tic)|redo|surveillance|follow[\s-]?up"
+)
+_AORTA_ACUTE = (
+    r"\w*aneurysm(?:al|s)?|rupture[ds]?|intramural|h(?:a)?ematoma|ulcer\w*|transection|trauma\w*"
+    r"|acute|emergen(?:t|cy)|abscess|endocarditis|aortitis|mycotic|dilat\w*|ectasia|ectatic"
+    # the same entities under the abbreviations a terse department types. These only ever ADD a
+    # screen, and none of them can plausibly appear in a valve-sizing description.
+    r"|aad|aas|imh|pau"
+)
+_AORTA_BEYOND_THE_ROOT = (
+    r"(?:thoracic|thoraco[\s-]?abdominal|abdominal|ascending|descending|entire|whole|total)"
+    r"\s+aorta|aorto[\s-]?(?:iliac|femoral)|ilio[\s-]?femoral|arch|bifurcation|iliacs?"
+    r"|runoff|run[\s-]?off"
+)
+_AORTA_SIZING_STUDY = re.compile(
+    rf"^(?!.*\bdissection\b)"
+    rf"(?!.*\b(?:{_AORTA_OPERATED})\b)"
+    rf"(?!.*\b(?:{_AORTA_ACUTE})\b)"
+    rf"(?:.*\btavr[\s-]+planning\b"
+    rf"|(?!.*\b(?:{_AORTA_BEYOND_THE_ROOT})\b)"
+    rf".*(?:\baortic\s+root\b|\broot\s+of\s+(?:the\s+)?aorta\b))"
+)
 
 _REGION_EXCLUSIONS: dict[str, re.Pattern[str]] = {
     "head":  _MSK_JOINT_HEAD,
     "brain": _MSK_JOINT_HEAD,
-    "aorta": _TAVR_PLANNING,
+    "aorta": _AORTA_SIZING_STUDY,
 }
 
 # Aliases match on WORD BOUNDARIES, unlike the plain-substring match on the key itself.
