@@ -617,3 +617,49 @@ async def test_a_chart_write_failure_never_costs_the_escalation(stores, monkeypa
     validate_skill_output("comms.escalate", out)
     assert out["escalated"] is True
     assert out["newTaskId"]
+
+
+# --- the escalation marker must not compound (#123) ----------------------------------------
+
+def test_plain_finding_strips_accumulated_markers():
+    from handler import _plain_finding
+    assert _plain_finding("pneumothorax") == "pneumothorax"
+    assert _plain_finding("[ESCALATED] pneumothorax") == "pneumothorax"
+    assert _plain_finding("[ESCALATED] [ESCALATED] pneumothorax") == "pneumothorax"
+    assert _plain_finding("  [ESCALATED]   [ESCALATED]  aortic dissection") == "aortic dissection"
+    assert _plain_finding("") == ""
+    # only a LEADING marker is decoration; the word inside the finding text is left alone
+    assert _plain_finding("pneumothorax [ESCALATED]") == "pneumothorax [ESCALATED]"
+
+
+async def test_a_second_escalation_does_not_double_the_marker(stores):
+    """Seen live on the demo host: the acknowledgement receipt a physician read said
+    "[ESCALATED] [ESCALATED] pneumothorax". Each rung re-reads the previous Communication's
+    finding and prepends again, so the marker compounded once per rung."""
+    _, ledger = stores
+    sent = await handle("comms.dispatch", {"studyContext": SAMPLE_CONTEXT, "impression": CRITICAL})
+
+    first = await handle("comms.escalate",
+                         {"studyContext": SAMPLE_CONTEXT, "taskId": sent["taskId"]})
+    second = await handle("comms.escalate",
+                          {"studyContext": SAMPLE_CONTEXT, "taskId": first["newTaskId"]})
+    validate_skill_output("comms.escalate", second)
+
+    summary = ledger.communications[second["newCommunicationId"]].finding_summary
+    assert summary.count("[ESCALATED]") == 1, summary
+    assert "aortic dissection" in summary
+
+
+async def test_the_chart_entry_carries_no_marker_even_after_two_rungs(stores, monkeypatch):
+    """The #123 chart write passes the finding straight through, so an accumulating marker would
+    have landed in the patient's chart too."""
+    monkeypatch.setenv("EHR_INBOX_WRITE_ENABLED", "1")
+    fhir, _ = stores
+    sent = await handle("comms.dispatch", {"studyContext": SAMPLE_CONTEXT, "impression": CRITICAL})
+    first = await handle("comms.escalate",
+                         {"studyContext": SAMPLE_CONTEXT, "taskId": sent["taskId"]})
+    second = await handle("comms.escalate",
+                          {"studyContext": SAMPLE_CONTEXT, "taskId": first["newTaskId"]})
+
+    entry = [n for n in fhir.notifications_written if n["ack_task_id"] == second["newTaskId"]][-1]
+    assert "[ESCALATED]" not in entry["finding"]
