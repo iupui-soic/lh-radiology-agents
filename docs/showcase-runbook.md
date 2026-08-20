@@ -15,8 +15,8 @@ origin the #75 Caddy overlay serves. Nothing else is reachable off-box.
 | Reading worklist | `https://demo.example.org/reading` | proxy login (`DEMO_PROXY_USER`) |
 | Viewer (reading mode) | `https://demo.example.org/read?...` — reached ONLY by clicking a worklist row | same origin, same login |
 | RIS / OpenMRS login | `https://demo.example.org/openmrs/login.htm` | radiologist's own OpenMRS account |
-| RIS order page (read-only) | `https://demo.example.org/openmrs/module/radiology/radiologyOrder.form?orderId=<uuid>` — reached via the viewer's **Report this study** action. Shows the order and any pre-sign draft. It carries **no claim button** on this build (#109), and its "View Study" link points at a `localhost:8081` Weasis URL that is dead from any reviewer's browser: ignore it, the viewer is the `/read` route | OpenMRS session |
-| RIS report form (claim, author, sign) | `https://demo.example.org/openmrs/module/radiology/radiologyReport.form?orderId=<uuid>` — **opening this URL is the claim**: it creates the draft and redirects to `?reportId=<n>` | OpenMRS session |
+| RIS order page (read-only) | `https://demo.example.org/openmrs/module/radiology/radiologyOrder.form?orderId=<uuid>` — reached via the viewer's **Report this study** action. Shows the order only: despite what this row used to claim, the pre-sign draft is **not** rendered here (verified 2026-08-20), so arc 2's "look, the AI already drafted" beat has to happen on the report form. It carries **no claim button** on this build (#109), and its "View Study" link points at a `localhost:8081` Weasis URL that is dead from any reviewer's browser: ignore it, the viewer is the `/read` route | OpenMRS session |
+| RIS report form (claim, author, sign) | **Depends on whether the study has an AI draft.** No COMPLETE finding: `…/radiologyReport.form?orderId=<uuid>` **is the claim** — it creates the draft and redirects to `?reportId=<n>`. Any COMPLETE finding (so ~45 of the cohort): that same URL throws an OpenMRS crash page, `cannot.create.already.claimed`, because ris-presign-bridge already made the draft — open `…/radiologyReport.form?reportId=<n>` instead. **Nothing in the UI tells you `<n>`** (#120): the Radiology → Reports list shows 0 of 0 because every AI draft has a NULL interpreter. Look it up before the session, see §1.7 | OpenMRS session |
 | Patient chart (referring MD) | `https://demo.example.org/openmrs` → find patient → chart shows the **AI critical result notification** entry | physician's own OpenMRS account |
 | Critical-result ack (phone) | `https://demo.example.org/reading-api/ack/<taskId>?sig=…` — the signed link inside the chart notification | physician's OpenMRS account (live session if the link sits under `/openmrs`, else an HTTP Basic prompt) |
 | Sign-off override (phone) | `https://demo.example.org/ingress/signoff/<workflowId>/override` — the link inside the escalation page | `SIGNOFF_OVERRIDE_TOKEN` |
@@ -76,6 +76,24 @@ origin the #75 Caddy overlay serves. Nothing else is reachable off-box.
    reaches fhir2/the poller and every read parks at the gate (workaround for #70; real fix o3).
 6. Smoke: `https://demo.example.org/` → 401 without the proxy login; `/reading` lists the
    cohort after login; one seeded `report_seeder.py finalize` releases a test study end to end.
+7. **Write down the `reportId` of every study you plan to open.** Any study with a COMPLETE
+   finding already has an AI draft, its `?orderId=` claim URL throws, and the RIS gives you no
+   way to find the draft's id: Radiology → Reports lists 0 of 0, because every AI draft has a
+   NULL `principal_results_interpreter` and the list inner-joins it (#120). Until that is fixed
+   the ids come from the database, so collect them BEFORE the session and keep them with the
+   arc sheet:
+
+   ```sql
+   SELECT rr.report_id, o.accession_number
+     FROM radiology_report rr JOIN orders o ON o.order_id = rr.order_id
+    WHERE rr.voided = 0 AND rr.report_status = 'DRAFT'
+    ORDER BY rr.report_id;
+   ```
+
+8. **The OpenMRS session expires.** It timed out inside a single rehearsal on 2026-08-20 and
+   bounced the RIS tab to `login.htm` mid-arc. Log in fresh immediately before the session,
+   keep the RIS tab active between arcs, and if a click lands on the login page, log back in
+   and re-open the study rather than improvising in front of the audience.
 
 ## 2. Arc 1 — routine clear CXR (~3 min): the fast path
 
@@ -88,9 +106,11 @@ origin the #75 Caddy overlay serves. Nothing else is reachable off-box.
    COMPLETE finding.
 4. **Report this study** (right panel / toolbar). Expected: popup lands on
    `/openmrs/module/radiology/radiologyOrder.form?orderId=<uuid>`, which shows the order.
-   **There is no Claim Report button on this build (#109).** Claim by changing `radiologyOrder`
-   to `radiologyReport` in that URL, keeping the same `orderId`: that creates the draft and
-   redirects to `?reportId=<n>`. Author a normal report (FINDINGS + IMPRESSION sections), set
+   **There is no Claim Report button on this build (#109).** Arc 1's study is a normal one with
+   no COMPLETE finding, so it has no AI draft and the claim works the documented way: change
+   `radiologyOrder` to `radiologyReport` in that URL, keeping the same `orderId`. That creates
+   the draft and redirects to `?reportId=<n>`. (This is the ONLY arc where that URL is safe —
+   see the location map and arc 2 step 4.) Author a normal report (FINDINGS + IMPRESSION sections), set
    **Results Interpreter** to yourself, then **Complete**, which is the sign. Expected: the page
    returns with "Report completed" and status **Completed**.
 5. **Narrate the silence:** poller joins the final DiagnosticReport within one cycle,
@@ -101,17 +121,30 @@ origin the #75 Caddy overlay serves. Nothing else is reachable off-box.
 ## 3. Arc 2 — pneumothorax, the full closed loop (~7 min): the centerpiece
 
 1. **Restage** a pneumothorax-positive cohort study whose order carries the J93*/J95.811 reason
-   code (STAT). Expected on `/reading`: it lands at the **top**, tier STAT.
-2. **Before anyone reads**, RIS window at
-   `/openmrs/module/radiology/radiologyOrder.form?orderId=<uuid>`: the pre-sign **preliminary**
-   DiagnosticReport (authorship-stamped draft impression) is already there. Point at it: the AI
-   drafted before the human opened the study, and it can only ever overwrite its own draft.
+   code. Expected on `/reading`: tier **STAT**, at the top.
+   **Check this the morning of.** Tier STAT needs the order's reasonCode to reach triage, and
+   until the #81 resolver fix is deployed it does not: the module never materialises the nested
+   `conceptReferenceTerm` in a custom REST rep, so every reason code was dropped and the whole
+   cohort topped out at URGENT/80 (found 2026-08-20; fix verified 10/10 studies then score
+   100/STAT). On an unfixed build, say URGENT and move on rather than promising STAT.
+   Be aware of what the row does NOT show either way: within a tier the list sorts by study
+   date, not by finding, and the AI column is a bare margin multiplier with no pathology name —
+   so the biggest badges on screen are effusions (8.1x, 7.8x) while a real pneumothorax can read
+   1.2x. Do not invite the audience to spot the sick patient from the worklist.
+2. **Before anyone reads**, open the **report form** for the study (`?reportId=<n>`, see the
+   location map): the pre-sign draft impression is there, stamped **Created By: AI Presign
+   Bridge**, editable by the radiologist. Point at that stamp: the AI drafted before the human
+   opened the study, and it can only ever overwrite its own draft.
+   **Not** the order page — it shows the order only, no draft (verified 2026-08-20).
 3. **Worklist row click →** `/read?...`: PA + lateral hang, right panel already open, banner
    reads "Pneumothorax screening signal (not a read): positive at p=…" with zero clicks; show
    the CAD evidence overlay.
-4. **Report this study →** switch `radiologyOrder.form` to `radiologyReport.form` in the URL,
-   which is the claim on this build (#109, and arc 1 step 4) → author, accepting or editing the
-   draft impression → set **Results Interpreter** → **Complete**, which is the sign.
+4. **Report this study →** this study HAS an AI draft, so do **not** swap `radiologyOrder.form`
+   for `radiologyReport.form?orderId=` — that throws an OpenMRS crash page,
+   `cannot.create.already.claimed` (#120), complete with a "Found a bug?" form. Go to the draft
+   you already opened in step 2, `?reportId=<n>` → author, accepting or editing the draft
+   impression → set **Results Interpreter** (autocomplete on your own name) → **Complete**,
+   which is the sign.
 5. **The page goes out.** Chart of the ordering patient (`/openmrs`, logged in as the referring
    physician): the **AI critical result notification** entry is on the chart — finding label +
    accession + the signed ack link, never the narrative.
@@ -142,14 +175,32 @@ and only a positive screen ever becomes a COMPLETE finding. Full detail: `docs/c
 
 ## 4. Arc 3 — sloppy dictation and the override (~4 min)
 
-1. **Restage** a cohort study; sign a report in the RIS **without an IMPRESSION section**.
-2. Expected: verification **WARN**, the sign-off gate holds the workflow, the tier timer arms.
-3. **Escalation page arrives** (comms channel per the rota) carrying the override link.
+Pick a study with **no** COMPLETE finding for this arc: it then has no AI draft, so the
+`?orderId=` claim works normally (arc 1 step 4) and nothing collides.
+
+1. **Restage** a cohort study; sign a report in the RIS **without an IMPRESSION section**
+   (FINDINGS prose only, no IMPRESSION header).
+2. Expected: verification **WARN** on rule `impression-section-present` ("Report has a findings
+   section but no impression/conclusion"), the sign-off gate holds the workflow, the tier timer
+   arms. Rehearsed live 2026-08-20, exactly as described.
+3. **Do NOT wait for the escalation page. It will not arrive during the demo.** The ladder's
+   first rung is 240 minutes for ROUTINE and 60 minutes even for STAT
+   (`orchestrator/config/escalation-policy.yaml`); the rehearsal watched Temporal arm a 14400s
+   timer. Narrate the ladder instead — show the policy on screen if you want, name who each rung
+   pages and when — and say plainly that in production the page arrives on that clock. Then go
+   straight to step 4, which needs no page: the override URL is deterministic.
 4. **Phone on camera:** open
    `https://demo.example.org/ingress/signoff/<workflowId>/override` — the confirm page shows
    the held verdict (status + rule IDs; never report text). Enter name, reason, and the
-   override token; **Release the gate** → the "study released" receipt renders and the
-   workflow proceeds. Narrate: authenticated, audited, who-and-why on the record.
+   override token; **Release the gate** → the "study released" receipt renders, naming who
+   released it and when. Narrate: authenticated, audited, who-and-why on the record.
+   (If this 405s, the deployed build predates the #122 fix: the form was posting to the
+   in-cluster path, which the overlay does not serve. Fixed 2026-08-20.)
+5. **Say where it goes next, because the screen will not show an archive.** Release does not
+   re-verify: the study proceeds to a comms dispatch carrying the verdict plus the
+   acknowledgement — on the rehearsed study `acrCategory Cat2`, sent to `ehr-inbox` AND
+   `oncall-pager` — and then parks on a **~24 hour acknowledgement deadline**. So arc 3 ends at
+   the receipt, not at ARCHIVED. Do not stand waiting for a terminal state.
 
 ## 5. Arc 4 — pre-read EHR value (~2 min, coda)
 
