@@ -10,19 +10,19 @@
       "modality": "CR",
       "studyDescription": "CHEST (PA AND LAT)",
       "studies": 3,
-      "tools": ["cxr-screen", "pneumothorax-detect", "effusion-detect"]
+      "tools": ["cxr-screen", "pneumothorax-detect", "effusion-detect", "consolidation-detect", "edema-detect"]
     },
     {
       "modality": "DX",
       "studyDescription": "CHEST (PA AND LAT)",
       "studies": 41,
-      "tools": ["cxr-screen", "pneumothorax-detect", "effusion-detect"]
+      "tools": ["cxr-screen", "pneumothorax-detect", "effusion-detect", "consolidation-detect", "edema-detect"]
     },
     {
       "modality": "DX",
       "studyDescription": "CHEST (PORTABLE AP)",
       "studies": 56,
-      "tools": ["cxr-screen", "pneumothorax-detect", "effusion-detect"]
+      "tools": ["cxr-screen", "pneumothorax-detect", "effusion-detect", "consolidation-detect", "edema-detect"]
     }
   ]
 }

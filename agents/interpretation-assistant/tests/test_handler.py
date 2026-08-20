@@ -293,9 +293,12 @@ async def test_pneumothorax_other_intrathoracic_injury_code_stays_unmatched():
     # abbreviations
     ("CT", "CT ABD PELVIS",              ["liver-lesion-detect", "pelvic-fracture-detect"]),
     ("CT", "CT ANGIO AORTIC ARCH",       ["aortic-dissection-detect"]),
-    ("CR", "CXR",                        ["cxr-screen", "pneumothorax-detect", "effusion-detect"]),
-    ("CR", "CXR PORTABLE",               ["cxr-screen", "pneumothorax-detect", "effusion-detect"]),
-    ("DX", "THORAX PA",                  ["cxr-screen", "pneumothorax-detect", "effusion-detect"]),
+    ("CR", "CXR",                        ["cxr-screen", "pneumothorax-detect", "effusion-detect",
+                                          "consolidation-detect", "edema-detect"]),
+    ("CR", "CXR PORTABLE",               ["cxr-screen", "pneumothorax-detect", "effusion-detect",
+                                          "consolidation-detect", "edema-detect"]),
+    ("DX", "THORAX PA",                  ["cxr-screen", "pneumothorax-detect", "effusion-detect",
+                                          "consolidation-detect", "edema-detect"]),
     ("US", "RUQ ULTRASOUND",             ["gallstone-detect"]),
     ("US", "US LIVER",                   ["gallstone-detect"]),
 ])
