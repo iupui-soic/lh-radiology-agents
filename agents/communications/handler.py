@@ -245,6 +245,34 @@ async def _escalate(payload: dict) -> dict:
         specialty=derive_specialty(payload["studyContext"].get("study") or {}),
         fallback=out_of_specialty_fallback(),
     )
+    # The escalated loop needs the SAME chart delivery the first dispatch got (#123). Two things
+    # depend on this call and both were broken without it, found driving arc 2 in a browser:
+    #
+    #   * the chart entry is anchored on the accession, so re-delivering UPDATES it in place to
+    #     name the LIVE ack task. Without this it kept pointing at the task the escalation had
+    #     just marked FAILED, so the physician's only link was a dead one;
+    #   * the signed ack link is minted INSIDE write_critical_result_notification, so the on-call
+    #     recipient got a page whose whole payload was "[ESCALATED] <finding>" and no way to
+    #     acknowledge. An escalation that cannot be acknowledged just escalates again.
+    #
+    # The plain `finding`, not the "[ESCALATED] " prefixed one the Communication carries: the
+    # chart entry is the record of THIS critical result, one per accession, and rewriting its
+    # text on every rung would churn the patient's chart to say nothing new.
+    #
+    # Best-effort exactly like dispatch's: deliver_critical_result_to_chart swallows every
+    # exception and returns a status, so a chart-write failure never costs the page or the ledger
+    # record that already exist. Nothing is added to the return value -- comms.escalate's output
+    # is additionalProperties:false and this is a side effect, not a new contract field.
+    if result.get("escalated") and result.get("newTaskId"):
+        await deliver_critical_result_to_chart(
+            _fhir(),
+            patient_ref=patient_ref,
+            service_request_ref=order_ref,
+            finding=finding,
+            accession=(payload["studyContext"].get("study") or {}).get("accessionNumber") or "",
+            ack_task_id=result["newTaskId"],
+            sent_iso=now_iso(),
+        )
     return _out(payload, escalatedAt=now_iso(), **result)
 
 
