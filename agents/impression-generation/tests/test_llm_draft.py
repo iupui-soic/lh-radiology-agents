@@ -507,3 +507,90 @@ async def test_transport_failure_is_not_retried(monkeypatch):
     out = await draft_impression(conclusion="", finding_labels="", critical_flags=[], ehr_context={})
     assert out is None
     assert calls["n"] == 1
+
+
+# --- unfilled template placeholders in the drafted prose --------------------------------
+# The two impression texts below are VERBATIM from a live local-model run (llama3.2:3b on the
+# demo host, 2026-08-20): 2 of 30 normal-case drafts came back carrying one. They matter more
+# than an invented string would, because the pre-sign path writes impressionText straight into
+# the chart as a preliminary DiagnosticReport. The prompts behind them were synthetic textbook
+# phrases with an empty ehr_context -- no cohort text reached the model, so this is model
+# output about nobody.
+
+async def test_observed_patient_name_placeholder_is_rejected(monkeypatch):
+    _clear(monkeypatch)
+    _configure(monkeypatch)
+    leaked = ("The radiologic examination of [patient name] revealed no evidence of acute "
+              "cardiopulmonary pathology. The study is normal.")
+    content = _json.dumps({"impressionText": leaked, "recommendations": []})
+    transport, _ = _responding(200, content=content)
+    _install(monkeypatch, transport)
+    out = await draft_impression(conclusion="", finding_labels="", critical_flags=[], ehr_context={})
+    assert out is None
+
+
+async def test_observed_insert_context_placeholder_is_rejected(monkeypatch):
+    _clear(monkeypatch)
+    _configure(monkeypatch)
+    leaked = ("The patient presented with [insert context], and no acute cardiopulmonary "
+              "abnormalities were identified on imaging.")
+    content = _json.dumps({"impressionText": leaked, "recommendations": []})
+    transport, _ = _responding(200, content=content)
+    _install(monkeypatch, transport)
+    out = await draft_impression(conclusion="", finding_labels="", critical_flags=[], ehr_context={})
+    assert out is None
+
+
+async def test_placeholder_in_a_recommendation_is_rejected(monkeypatch):
+    """Same defect one field over -- and the recommendations are what a reader acts on."""
+    _clear(monkeypatch)
+    _configure(monkeypatch)
+    content = _json.dumps({
+        "impressionText": "Findings consistent with a right-sided pneumothorax.",
+        "recommendations": ["Contact [ordering physician] urgently."],
+    })
+    transport, _ = _responding(200, content=content)
+    _install(monkeypatch, transport)
+    out = await draft_impression(
+        conclusion="", finding_labels="", critical_flags=CRITICAL_FLAGS, ehr_context={})
+    assert out is None
+
+
+async def test_a_placeholder_draft_is_retried_once_and_a_clean_retry_is_accepted(monkeypatch):
+    """The reject rides the existing #103 retry ladder, which is what makes it cheap: sampling is
+    not deterministic, so the second ask usually comes back filled in."""
+    _clear(monkeypatch)
+    _configure(monkeypatch)
+    leaked = _json.dumps({"impressionText": "Study of [patient name] is normal.",
+                          "recommendations": []})
+    clean = _json.dumps({"impressionText": "No acute cardiopulmonary abnormality.",
+                         "recommendations": []})
+    transport, seen = _responding_sequence([leaked, clean])
+    _install(monkeypatch, transport)
+    out = await draft_impression(conclusion="", finding_labels="", critical_flags=[], ehr_context={})
+    assert out == LLMDraft(impression_text="No acute cardiopulmonary abnormality.", recommendations=[])
+    assert len(seen) == 2
+
+
+async def test_curly_braces_in_prose_are_still_accepted(monkeypatch):
+    """Pinned alongside the guard: {sic} is legitimate prose, so the check stays square-only."""
+    _clear(monkeypatch)
+    _configure(monkeypatch)
+    content = _json.dumps({"impressionText": "Density measures 40 HU {sic}.",
+                           "recommendations": ["Correlate."]})
+    transport, _ = _responding(200, content=content)
+    _install(monkeypatch, transport)
+    out = await draft_impression(conclusion="", finding_labels="", critical_flags=[], ehr_context={})
+    assert out == LLMDraft(impression_text="Density measures 40 HU {sic}.", recommendations=["Correlate."])
+
+
+async def test_comparison_operators_in_prose_are_not_placeholders(monkeypatch):
+    """The other reason the check is square-only: radiology writes comparison operators."""
+    _clear(monkeypatch)
+    _configure(monkeypatch)
+    prose = "Subcentimetre nodule <5 mm; cardiothoracic ratio >0.5."
+    content = _json.dumps({"impressionText": prose, "recommendations": []})
+    transport, _ = _responding(200, content=content)
+    _install(monkeypatch, transport)
+    out = await draft_impression(conclusion="", finding_labels="", critical_flags=[], ehr_context={})
+    assert out == LLMDraft(impression_text=prose, recommendations=[])

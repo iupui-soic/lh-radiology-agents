@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
@@ -39,6 +40,23 @@ _warned_misconfigured = False
 _DEFAULT_TIMEOUT_SECONDS = 12.0
 
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+# An unfilled template placeholder the model left in the prose: "[patient name]", "[insert
+# context]". Observed live at ~7% of normal-case drafts (2 of 30) against a local 3B model, and
+# the pre-sign path writes impressionText STRAIGHT into the chart as a preliminary
+# DiagnosticReport -- so the failure mode is a clinician reading "[patient name]" in a real
+# record, on a study where nothing else looks wrong.
+#
+# SQUARE brackets only, and deliberately so:
+#   * curly braces are legitimate prose here -- "Density measures 40 HU {sic}." is a pinned
+#     acceptance (test_brace_inside_the_prose_does_not_unbalance_the_scan), so rejecting {...}
+#     would break a documented case;
+#   * angle brackets carry the comparison operators radiology actually writes ("nodule <5 mm"),
+#     which a paired-span test would trip over.
+# Square brackets survive that filter: impression prose does not use them, and both observed
+# leaks were square. Same conservative bias as every other check in _parse_draft -- a false
+# reject costs the deterministic template, a false accept reaches a chart.
+_PLACEHOLDER = re.compile(r"\[[^\]]*\]")
 
 
 def _is_plaintext_remote(base_url: str) -> bool:
@@ -251,6 +269,17 @@ def _parse_draft(content: str, critical_flags: list[dict]) -> LLMDraft:
         isinstance(r, str) and r.strip() for r in recommendations
     ):
         raise ValueError("malformed recommendations")
+    # Prose the model never finished filling in (see _PLACEHOLDER). Recommendations are scanned
+    # too, not just the impression: "Contact [ordering physician]" is the same defect one field
+    # over, and the recommendations are what a reader is meant to act on.
+    #
+    # Must stay BELOW the shape check above, which is what guarantees every recommendation is a
+    # str -- .search() on a non-str raises TypeError, which the caller's ladder does catch, but
+    # the operator would then read the wrong reason for the fallback.
+    if _PLACEHOLDER.search(impression_text) or any(_PLACEHOLDER.search(r) for r in recommendations):
+        # Reason only, never the matched text: a placeholder sits INSIDE cohort-derived prose,
+        # and this string is logged (see the module docstring's logging discipline).
+        raise ValueError("unfilled placeholder in the drafted prose")
     # An EMPTY list is legitimate and must stay that way (#103). A normal study warrants no
     # recommendation, the model says so by returning [], and requiring one here threw away the
     # draft for most of a screening cohort -- silently, since the fallback is by design. Where a
