@@ -28,6 +28,8 @@ origin the #75 Caddy overlay serves. Nothing else is reachable off-box.
 
 1. Stack up under the overlay:
    `SIGNOFF_OVERRIDE_TOKEN=… A2A_CALLBACK_TOKEN=… docker compose -f docker-compose.yml -f docker-compose.tls.yml up -d`
+   (whatever chain you bring it up with is the chain EVERY later command must repeat, so write it
+   down; §6a step 2 derives it back off the running project)
    (plus `--profile otel` for the Jaeger visual). Compose refuses dev-default secrets.
 2. #68 cohort loaded (FHIR → DICOM → `link_radiology_studies.py`), referring physicians seeded (!97).
 3. Flags on, each with its recorded sign-off: `ORTHANC_PRESIGN_WRITE_ENABLED=1`,
@@ -248,19 +250,30 @@ The app services run CI-published images (#97), so a deploy is a pull, never a h
 the drift class behind #83 cannot recur. Only in an announced window, never mid-review:
 
 1. Announce the window; finish or reset any in-flight arc.
-2. On the host (repo root, with the SAME `-f` overlay chain the stack was started with --
-   a bare `docker compose` command against an overlay-started stack recreates services and
-   can land the OpenMRS volume wedge):
+2. On the host (repo root). **Derive the `-f` chain, never type it from memory.** Every later
+   compose command must carry the SAME chain the stack was started with: a command missing one
+   overlay makes Compose see the affected service's config as changed, so it recreates it and
+   anything depending on it, which is how the OpenMRS volume wedge happens. This doc used to
+   hardcode a two-file chain while the demo host was actually running three (yml + tls + seed),
+   so running it verbatim would have recreated mariadb and openmrs mid-deploy. Read the real
+   chain off the running project and reuse it:
+
+   ```bash
+   docker compose ls        # CONFIG FILES column = the chain, in order
+   COMPOSE="docker compose $(docker compose ls --format json \
+     | python3 -c 'import sys,json; print(" ".join("-f "+f for f in json.load(sys.stdin)[0]["ConfigFiles"].split(",")))')"
+   echo "$COMPOSE"          # eyeball it before it touches anything
+   ```
+
+   Then, with `APP` as the app-service list:
+
    ```bash
    git pull                                   # compose + configs only; images come from CI
-   docker compose -f docker-compose.yml -f docker-compose.tls.yml pull \
-     orchestrator worklist-triage ehr-assistant interpretation-assistant \
-     impression-generation report-verification communications worklist-api ohif \
-     ris-sign-bridge ris-presign-bridge
-   docker compose -f docker-compose.yml -f docker-compose.tls.yml up -d --no-deps \
-     orchestrator worklist-triage ehr-assistant interpretation-assistant \
-     impression-generation report-verification communications worklist-api ohif \
-     ris-sign-bridge ris-presign-bridge
+   APP="orchestrator worklist-triage ehr-assistant interpretation-assistant \
+        impression-generation report-verification communications worklist-api ohif \
+        ris-sign-bridge ris-presign-bridge"
+   $COMPOSE pull $APP
+   $COMPOSE up -d --no-deps $APP
    ```
    Both bridges are named because both are app services on the pull path; they share one
    published image (`ris-sign-bridge`) and differ only in the command, so a deploy that
@@ -272,7 +285,7 @@ the drift class behind #83 cannot recur. Only in an announced window, never mid-
    (variable `proxy_pass` + `resolver` in `docker/ohif/default.conf`), so a recreated upstream
    is picked up within seconds. One deliberate exception, because that conf is volume-mounted
    from the checkout: when the `git pull` in step 2 changed `docker/ohif/default.conf` itself,
-   run `docker compose -f docker-compose.yml -f docker-compose.tls.yml restart ohif` once so
+   run `$COMPOSE restart ohif` once so
    nginx loads the new conf. Before #104 a stale pinned IP cost four and a half hours of
    `/reading` 502 (2026-08-06) while every API-level check passed; the browser smoke in step 5
    is the guard that keeps that class of failure visible.
@@ -294,7 +307,7 @@ the drift class behind #83 cannot recur. Only in an announced window, never mid-
    and compare the `app.bundle.<hash>.js` it names against the host's:
 
    ```bash
-   docker compose -f docker-compose.yml -f docker-compose.tls.yml exec -T ohif \
+   $COMPOSE exec -T ohif \
      grep -oE 'app.bundle.[a-f0-9]+.js' /usr/share/nginx/html/index.html
    ```
 
