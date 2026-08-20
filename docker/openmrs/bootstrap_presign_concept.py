@@ -141,6 +141,15 @@ _CONCEPTS = [
 # Resolved by class NAME, not a hardcoded uuid, so it holds even if a future
 # o3 image regenerates class uuids.
 RADIOLOGY_CONCEPT_CLASSES_GP = "radiology.radiologyConceptClasses"
+
+# The legacy patient dashboard's Overview tab renders the latest obs for the concepts listed
+# here, and nothing else surfaces a bare Observation: the dashboard's other widgets are
+# encounter-driven. Ships unset on this build, which is why the critical-result notification
+# was written correctly, returned by fhir2, and invisible to the physician it was written for
+# (#123, found in the #76 arc 2 rehearsal when a referring physician opened the chart and
+# found nothing). The ack link lives inside that entry, so the closing loop of the critical
+# result pathway was unreachable without someone passing the link along out of band.
+OVERVIEW_SHOW_CONCEPTS_GP = "dashboard.overview.showConcepts"
 RADIOLOGY_PROCEDURE_CLASS_NAME = "Radiology/Imaging Procedure"
 
 
@@ -317,6 +326,59 @@ def _configure_radiology_concept_classes(cursor) -> bool:
     return True
 
 
+def _show_notification_on_the_patient_overview(cursor) -> bool:
+    """Add the critical-result notification concept to `dashboard.overview.showConcepts` (#123).
+
+    APPENDS rather than replaces, unlike `_configure_radiology_concept_classes` above. That GP is
+    a single value where an operator's choice is the answer; this one is a LIST, so "already set"
+    is not a reason to skip -- it would leave the notification invisible on exactly the
+    deployments that use the overview for something else. Ours is added once and any existing
+    entries are preserved in order.
+
+    Never a hard failure: a chart that does not surface the notification is a real problem, but it
+    is not a reason to fail stack startup and take the whole demo with it. The concept row itself
+    is provisioned earlier in this same run, so a miss here means the GP is absent (module//core
+    version without it), which is worth a warning and nothing more.
+    """
+    cursor.execute(
+        "SELECT concept_id FROM concept WHERE uuid = %s AND retired = 0 LIMIT 1",
+        (NOTIFICATION_CONCEPT_UUID,),
+    )
+    row = cursor.fetchone()
+    if row is None:
+        log.warning("notification concept %s not found; cannot add it to %s.",
+                    NOTIFICATION_CONCEPT_UUID, OVERVIEW_SHOW_CONCEPTS_GP)
+        return True
+    concept_id = str(row[0])
+
+    cursor.execute(
+        "SELECT property_value FROM global_property WHERE property = %s",
+        (OVERVIEW_SHOW_CONCEPTS_GP,),
+    )
+    row = cursor.fetchone()
+    if row is None:
+        log.warning("%s is not registered on this OpenMRS; the critical-result notification "
+                    "will not appear on the patient overview.", OVERVIEW_SHOW_CONCEPTS_GP)
+        return True
+
+    current = (row[0] or "").strip()
+    entries = [e.strip() for e in current.split(",") if e.strip()]
+    if concept_id in entries:
+        log.info("%s already lists the notification concept (%s); nothing to do.",
+                 OVERVIEW_SHOW_CONCEPTS_GP, concept_id)
+        return True
+
+    entries.append(concept_id)
+    value = ",".join(entries)
+    cursor.execute(
+        "UPDATE global_property SET property_value = %s WHERE property = %s",
+        (value, OVERVIEW_SHOW_CONCEPTS_GP),
+    )
+    log.info("Set %s = %r (added the critical-result notification concept %s).",
+             OVERVIEW_SHOW_CONCEPTS_GP, value, concept_id)
+    return True
+
+
 def bootstrap(
     host: str, database: str, user: str, password: str,
 ) -> int:
@@ -338,6 +400,9 @@ def bootstrap(
             if not _configure_radiology_concept_classes(cursor):
                 conn.rollback()
                 return 2
+
+            # Runs AFTER the concepts exist: it looks the notification concept up by uuid.
+            _show_notification_on_the_patient_overview(cursor)
 
             conn.commit()
             return 0
