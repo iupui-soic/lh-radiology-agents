@@ -119,12 +119,56 @@ _MSK_JOINT_HEAD = re.compile(
 # A post-TAVR surveillance CT of the aorta is aorta imaging in a population that CAN dissect,
 # and excluding on "tavr" alone would silently remove its dissection screen. A wrong exclusion
 # deletes screening; over-narrow beats over-broad here.
-_TAVR_PLANNING = re.compile(r"\btavr[\s-]+planning\b")
+# The PI REVERSED the aortic-root half of the 2026-07-15 ruling on #64 (2026-08-06): "TAVR
+# planning and aortic-root CTs are valve and annulus sizing studies, ordered on a known workup,
+# not on suspicion of dissection. A screening detector firing there adds noise where a specialist
+# is already looking at the root." The earlier ruling kept the root matched because a type-A
+# dissection involves it; the reversal's point is that a dedicated root study is not ordered on
+# that question. The comment above still records the original reasoning, because knowing the call
+# was revisited matters more than a tidy file -- but the TAVR-only pattern it described is gone,
+# folded into the alternation below rather than left defined and referenced by nothing.
+#
+# The reversal's stated safety net does not exist, so do not rely on it. It was justified with
+# "if a dissection question is real the order carries it, and the reasonCode path selects the tool
+# anyway" -- that is not what the reasonCode path does. `aortic-dissection-detect` is not a key in
+# handler._REASON_CODE_RULES (only pneumothorax/pe/effusion are), and that path is a per-tool
+# ENRICHMENT loop over the tools this function already returned (handler.py `for tool in tools:`),
+# so it cannot add back a tool an exclusion removed. Verified by running it: an excluded
+# description carrying reasonCode I71.00 selects ['generic-ct-screen'] and nothing else. The same
+# is true of the TAVR exclusion that shipped before this one.
+#
+# So this exclusion SUBTRACTS a screen outright, with no fallback underneath it. The clinical call
+# is the PI's and stands; the point here is that the negative lookahead below is the only thing
+# keeping a real dissection study screened, which is why it is not optional.
+#
+# Two negative lookaheads, both the over-narrow-beats-over-broad rule made literal, because a
+# wrong exclusion DELETES a screen while a wrong inclusion only adds noise.
+#
+#   1. "dissection" anywhere -- a study that says it is a dissection study is one whatever else it
+#      names, so "CT AORTIC ROOT DISSECTION PROTOCOL" keeps its screen.
+#   2. post-operative / hardware cues -- a root that has been replaced, repaired or grafted is
+#      surveillance in a population that can dissect, and at higher risk than an unoperated one
+#      (anastomotic pseudoaneurysm, new dissection at the suture line). This is the SAME reason
+#      `CT AORTA POST TAVR` keeps its screen, pinned in
+#      test_the_exclusions_do_not_cost_the_real_studies -- "the exclusion refuses a region; it must
+#      not refuse the studies the region exists for". Without this, `CT POST AORTIC ROOT REPAIR`
+#      lost its screen while `CT AORTA POST TAVR` kept one, which is the same clinical situation
+#      described two ways.
+#
+# The cues are deliberately specific ("post-op", not a bare "post") so a sizing study written as
+# `AORTIC ROOT POST CONTRAST` is not rescued by the word "post". Where they do over-rescue, that
+# is the safe direction: keeping a screen costs noise, losing one costs a finding.
+_AORTA_SIZING_STUDY = re.compile(
+    r"^(?!.*\bdissection\b)"
+    r"(?!.*\b(?:post[\s-]?op(?:erative)?|status\s+post|s/p|replacement|repair|graft|stent"
+    r"|surveillance|follow[\s-]?up)\b)"
+    r".*(?:\btavr[\s-]+planning\b|\baortic\s+root\b|\broot\s+of\s+(?:the\s+)?aorta\b)"
+)
 
 _REGION_EXCLUSIONS: dict[str, re.Pattern[str]] = {
     "head":  _MSK_JOINT_HEAD,
     "brain": _MSK_JOINT_HEAD,
-    "aorta": _TAVR_PLANNING,
+    "aorta": _AORTA_SIZING_STUDY,
 }
 
 # Aliases match on WORD BOUNDARIES, unlike the plain-substring match on the key itself.

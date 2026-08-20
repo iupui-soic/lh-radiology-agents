@@ -372,6 +372,21 @@ def test_an_unrelated_study_still_falls_back_to_the_generic_screen():
     # exclusion and this selects aortic-dissection-detect.
     ("CT", "CT AORTIC VALVE TAVR PLANNING", ["generic-ct-screen"]),
     ("CT", "CT AORTIC VALVE TAVR-PLANNING PROTOCOL", ["generic-ct-screen"]),
+    # REVERSED 2026-08-06 (#64): the same ruling now covers a dedicated aortic-root study. The
+    # 2026-07-15 call kept the root matched ("a type-A dissection genuinely involves the root");
+    # the reversal is that a root study is ORDERED as valve/annulus sizing, not on the dissection
+    # question -- "a screening detector firing there adds noise where a specialist is already
+    # looking at the root". This row previously asserted the opposite and is changed deliberately.
+    ("CT", "CT CARDIAC AORTIC ROOT",       ["generic-ct-screen"]),
+    ("CT", "CT ROOT OF AORTA",             ["generic-ct-screen"]),
+    ("CT", "CT ROOT OF THE AORTA",         ["generic-ct-screen"]),
+    # the post-operative rescue is keyed on specific cues, not a bare "post": a sizing study
+    # written as "post contrast" must NOT be rescued by that word alone.
+    ("CT", "CT AORTIC ROOT POST CONTRAST", ["generic-ct-screen"]),
+    ("CT", "CT AORTIC ROOT ANNULUS SIZING", ["generic-ct-screen"]),
+    # ...but an explicit dissection mention beats the exclusion, because a wrong exclusion DELETES
+    # a screen. Same principle as the post-TAVR row below.
+    ("CT", "CT AORTIC ROOT DISSECTION PROTOCOL", ["aortic-dissection-detect"]),
 ])
 def test_a_region_named_but_not_the_subject_does_not_select_its_tools(modality, description, expected):
     assert select_tools(modality, description) == expected
@@ -395,12 +410,21 @@ def test_a_region_named_but_not_the_subject_does_not_select_its_tools(modality, 
     ]),
     ("CT", "CT HEAD AND FEMUR TRAUMA",     ["ich-detect", "stroke-detect"]),
     ("CT", "CT BRAIN AND SHOULDER",        ["ich-detect", "stroke-detect"]),
-    # a dedicated aortic-root study keeps the dissection screen (#64, PI ruling: a type-A
-    # dissection genuinely involves the root -- "leave it")
-    ("CT", "CT CARDIAC AORTIC ROOT",       ["aortic-dissection-detect"]),
     # the TAVR exclusion is the "tavr planning" bigram, not the bare acronym: post-TAVR
     # surveillance of the aorta is a population that CAN dissect and keeps its screen
     ("CT", "CT AORTA POST TAVR",           ["aortic-dissection-detect"]),
+    # ...and the SAME reasoning has to survive the #64 root exclusion, or the two rules describe
+    # one clinical situation two ways. A root that has been replaced, repaired, grafted or stented
+    # is surveillance in a population that can dissect, at HIGHER risk than an unoperated one
+    # (anastomotic pseudoaneurysm, new dissection at the suture line). The first cut of the root
+    # exclusion dropped the screen on every row below while `CT AORTA POST TAVR` above kept one.
+    ("CT", "CT AORTIC ROOT REPLACEMENT FOLLOW UP",    ["aortic-dissection-detect"]),
+    ("CT", "CT POST AORTIC ROOT REPAIR",              ["aortic-dissection-detect"]),
+    ("CT", "CT CHEST AORTIC ROOT GRAFT SURVEILLANCE", [
+        "lung-nodule-detect", "pe-detect", "aortic-dissection-detect",
+    ]),
+    ("CT", "CT AORTIC ROOT S/P REPAIR",               ["aortic-dissection-detect"]),
+    ("CT", "CT AORTIC ROOT STENT FOLLOW-UP",          ["aortic-dissection-detect"]),
 ])
 def test_the_exclusions_do_not_cost_the_real_studies(modality, description, expected):
     """The exclusion refuses a region; it must not refuse the studies the region exists for."""
