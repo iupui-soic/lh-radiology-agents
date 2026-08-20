@@ -594,3 +594,119 @@ async def test_comparison_operators_in_prose_are_not_placeholders(monkeypatch):
     _install(monkeypatch, transport)
     out = await draft_impression(conclusion="", finding_labels="", critical_flags=[], ehr_context={})
     assert out == LLMDraft(impression_text=prose, recommendations=[])
+
+
+# --- confirmed NON-CRITICAL findings (#76 rehearsal, 2026-08-20) ---------------------------
+#
+# effusion-detect is the first non-critical producer. The prompt named only CRITICAL findings as
+# authoritative, so a study whose one COMPLETE finding was a pleural effusion arrived as
+# "critical findings: none" with no report conclusion, and the model wrote a NORMAL impression --
+# which the pre-sign path then wrote to the chart. Reproduced live on 5 of 5 effusion-only
+# studies, one at p=0.77.
+
+EFFUSION_LABEL = ("Pleural effusion (screening p=0.65, raw 0.376 vs op 0.103); "
+                  "screening signal only, not a read")
+
+
+def test_finding_terms_keeps_only_the_pathology_head():
+    """Matching the whole label would reject every draft: no prose repeats the calibration tail."""
+    assert llm_draft._finding_terms([EFFUSION_LABEL]) == ["pleural effusion"]
+    assert llm_draft._finding_terms(EFFUSION_LABEL) == ["pleural effusion"]
+    assert llm_draft._finding_terms(["Pneumothorax (screening p=0.50)", EFFUSION_LABEL]) == [
+        "pneumothorax", "pleural effusion"]
+    assert llm_draft._finding_terms([]) == []
+    assert llm_draft._finding_terms(["", None]) == []
+
+
+def test_duplicate_finding_labels_dedupe():
+    assert llm_draft._finding_terms([EFFUSION_LABEL, EFFUSION_LABEL]) == ["pleural effusion"]
+
+
+async def test_normal_prose_next_to_a_confirmed_effusion_is_refused(monkeypatch):
+    """THE regression: no critical flag, a confirmed effusion, and the model says the study is
+    normal. Must degrade to None so the deterministic recital runs instead."""
+    _clear(monkeypatch)
+    _configure(monkeypatch)
+    transport, _ = _responding(
+        content=_draft_json("No acute cardiopulmonary abnormality."))
+    _install(monkeypatch, transport)
+    out = await draft_impression(conclusion="", finding_labels=[EFFUSION_LABEL],
+                                 critical_flags=[], ehr_context={})
+    assert out is None
+
+
+async def test_negating_a_confirmed_non_critical_finding_is_refused(monkeypatch):
+    """Naming the finding only to negate it, the non-critical twin of the critical-flag case."""
+    _clear(monkeypatch)
+    _configure(monkeypatch)
+    transport, _ = _responding(content=_draft_json(
+        "No pleural effusion or pneumothorax is identified."))
+    _install(monkeypatch, transport)
+    out = await draft_impression(conclusion="", finding_labels=[EFFUSION_LABEL],
+                                 critical_flags=[], ehr_context={})
+    assert out is None
+
+
+async def test_prose_asserting_the_confirmed_effusion_is_accepted(monkeypatch):
+    """The fix must not reject a correct draft: recommendations may still be empty for a
+    non-critical finding (#103), so only the assertion matters here."""
+    _clear(monkeypatch)
+    _configure(monkeypatch)
+    transport, _ = _responding(content=_draft_json(
+        "Small left pleural effusion. Clinical correlation recommended."))
+    _install(monkeypatch, transport)
+    out = await draft_impression(conclusion="", finding_labels=[EFFUSION_LABEL],
+                                 critical_flags=[], ehr_context={})
+    assert out == LLMDraft(
+        impression_text="Small left pleural effusion. Clinical correlation recommended.",
+        recommendations=["clinical correlation"])
+
+
+async def test_every_confirmed_finding_must_be_asserted_not_just_one(monkeypatch):
+    """A study that fires both heads: prose naming only the pneumothorax is silent about the
+    effusion. That is the shape of the 18 stale drafts found on the host."""
+    _clear(monkeypatch)
+    _configure(monkeypatch)
+    labels = ["Pneumothorax (screening p=0.53)", EFFUSION_LABEL]
+    transport, _ = _responding(content=_draft_json(
+        "Pneumothorax is present. No other acute cardiopulmonary abnormalities are identified."))
+    _install(monkeypatch, transport)
+    out = await draft_impression(conclusion="", finding_labels=labels,
+                                 critical_flags=[], ehr_context={})
+    assert out is None
+
+    transport2, _ = _responding(content=_draft_json(
+        "Pneumothorax is present with an accompanying pleural effusion."))
+    _install(monkeypatch, transport2)
+    out2 = await draft_impression(conclusion="", finding_labels=labels,
+                                  critical_flags=[], ehr_context={})
+    assert out2 is not None
+
+
+async def test_a_study_with_no_confirmed_finding_may_still_read_normal(monkeypatch):
+    """The check must not fire when nothing was confirmed: most of a screening cohort is normal,
+    and post-sign this path runs over reports with no AI finding at all (#103)."""
+    _clear(monkeypatch)
+    _configure(monkeypatch)
+    transport, _ = _responding(
+        content=_draft_json("No acute cardiopulmonary abnormality.", recommendations=[]))
+    _install(monkeypatch, transport)
+    out = await draft_impression(conclusion="Lungs are clear.", finding_labels=[],
+                                 critical_flags=[], ehr_context={})
+    assert out is not None
+    assert out.impression_text == "No acute cardiopulmonary abnormality."
+
+
+async def test_the_prompt_names_confirmed_findings_as_authoritative(monkeypatch):
+    """The prompt is the wire contract with the model: if it stops naming the confirmed findings,
+    the model goes back to inferring normality and these tests still pass on canned replies."""
+    _clear(monkeypatch)
+    _configure(monkeypatch)
+    transport, seen = _responding(content=_draft_json("Small left pleural effusion."))
+    _install(monkeypatch, transport)
+    await draft_impression(conclusion="", finding_labels=[EFFUSION_LABEL],
+                           critical_flags=[], ehr_context={})
+    prompt = seen[0]["body"]["messages"][1]["content"]
+    assert "Confirmed AI screening findings (authoritative, do not contradict): pleural effusion" in prompt
+    assert "MUST name each of them as present" in prompt
+    assert "do NOT write that the study is normal" in prompt.replace("Do NOT", "do NOT")
