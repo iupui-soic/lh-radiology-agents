@@ -10,7 +10,8 @@
 # fresh host (network required), before or after `up` -- the mount is a live bind.
 #
 # Pinned versions chosen for the module's 2.8.x-era pages; paths mirror the URLs the JSPs
-# request. Idempotent: existing non-empty files are kept.
+# request. Idempotent: existing non-empty files are kept (jquery.min.js is keyed on its Migrate
+# banner instead, see bundle_jquery).
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 V=radiology-vendor
@@ -20,7 +21,34 @@ mkdir -p $V/jquery $V/moment/min $V/datatables/media/js $V/datatables/media/css 
 
 dl() { [ -s "$2" ] || curl -fsSL "$1" -o "$2"; echo "$(wc -c < "$2")	$2"; }
 
-dl https://cdn.jsdelivr.net/npm/jquery@2.2.4/dist/jquery.min.js                                  $V/jquery/jquery.min.js
+# jQuery + jQuery Migrate, CONCATENATED into the single path the module's JSPs request (#121).
+#
+# The module's own scripts still call APIs jQuery dropped -- jquery.ui.autocomplete.autoSelect.js
+# calls .live(), removed in 1.9 -- so serving a bare 2.2.4 makes every RIS page throw
+# "TypeError: jQuery(...).live is not a function" during load. Migrate 1.x exists exactly to put
+# those back for jQuery 1.9-2.x. We cannot add a second <script> tag (the tags live in the omod's
+# JSPs), so the bundle ships as one file under the name they already ask for. The real fix is the
+# sibling module repo dropping .live(); until then this keeps the console clean.
+#
+# Idempotent like dl(), but keyed on the Migrate banner rather than mere existence: a host that
+# ran the pre-#121 script already has a non-empty jquery.min.js holding bare jQuery, and a plain
+# [ -s ] test would keep it forever.
+bundle_jquery() {
+  local out=$V/jquery/jquery.min.js
+  if [ -s "$out" ] && grep -q "jQuery Migrate" "$out"; then
+    echo "$(wc -c < "$out")	$out (jquery+migrate, kept)"
+    return
+  fi
+  local tmp
+  tmp=$(mktemp -d)
+  curl -fsSL https://cdn.jsdelivr.net/npm/jquery@2.2.4/dist/jquery.min.js > "$tmp/j.js"
+  curl -fsSL https://cdn.jsdelivr.net/npm/jquery-migrate@1.4.1/dist/jquery-migrate.min.js > "$tmp/m.js"
+  cat "$tmp/j.js" "$tmp/m.js" > "$out"
+  rm -rf "$tmp"
+  echo "$(wc -c < "$out")	$out (jquery 2.2.4 + migrate 1.4.1)"
+}
+
+bundle_jquery
 dl https://cdn.jsdelivr.net/npm/moment@2.29.4/min/moment-with-locales.min.js                     $V/moment/min/moment-with-locales.min.js
 dl https://cdn.jsdelivr.net/npm/datatables.net@1.10.25/js/jquery.dataTables.min.js               $V/datatables/media/js/jquery.dataTables.min.js
 dl https://cdn.jsdelivr.net/npm/datatables.net-dt@1.10.25/css/jquery.dataTables.min.css          $V/datatables/media/css/jquery.dataTables.min.css
