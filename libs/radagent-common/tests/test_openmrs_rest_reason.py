@@ -193,5 +193,74 @@ def test_the_custom_rep_asks_for_the_reason_mappings():
     naming orderReason mappings, every reason silently vanishes and these tests still pass on
     canned bundles -- so pin the request itself."""
     _resolve(_order(None))
-    assert ("orderReason:(mappings:(conceptReferenceTerm:(code,conceptSource:(name))))"
-            in _BundleClient.params_seen.get("v", ""))
+    rep = _BundleClient.params_seen.get("v", "")
+    assert "orderReason:(mappings:(display," in rep    # the shape a live o3 actually fills
+    assert "conceptReferenceTerm:(code,conceptSource:(name))" in rep
+
+
+# --- the shape a LIVE o3 returns ---------------------------------------------------------
+#
+# The REST layer does not materialise the nested `conceptReferenceTerm` inside a custom rep: it
+# answers `{"resourceVersion": "1.9"}` per mapping and puts the two facts in `display` instead.
+# Every fixture above uses the structured shape, which is why the codes could silently stop
+# travelling while the whole suite stayed green (found by rehearsing #76 against the demo host).
+LIVE_DISPLAY_MAPPINGS = [
+    {"display": "PIH: 2618", "resourceVersion": "1.9"},
+    {"display": "SNOMED CT: 36118008", "resourceVersion": "1.9"},
+    {"display": "ICD-10: J95.811", "resourceVersion": "1.9"},
+    {"display": "ICD-11-WHO: CB21.Z", "resourceVersion": "1.9"},
+]
+
+
+def test_the_live_display_only_mapping_shape_still_yields_its_icd10_code():
+    assert _icd10_reason_codes({"mappings": LIVE_DISPLAY_MAPPINGS}) == ["J95.811"]
+
+
+def test_the_display_fallback_applies_the_same_source_filter():
+    """ICD-11 must not ride the ICD10 prefix, and a non-ICD source contributes nothing -- the
+    display path cannot be laxer than the structured one."""
+    for name in ("ICD-10-WHO", "ICD-10", "icd 10", "ICD10", "ICD-10-CM"):
+        assert _icd10_reason_codes({"mappings": [{"display": f"{name}: J95.811"}]}) == ["J95.811"]
+    for display in ("ICD-11-WHO: CB21.Z", "SNOMED CT: 36118008", "CIEL: 122657"):
+        assert _icd10_reason_codes({"mappings": [{"display": display}]}) == []
+
+
+def test_a_structured_term_still_wins_where_a_deployment_materialises_it():
+    """Both shapes on one mapping: the structured term is the more precise source of truth."""
+    mapping = {"display": "ICD-10: J93.9",
+               "conceptReferenceTerm": {"code": "J95.811", "conceptSource": {"name": "ICD-10-WHO"}}}
+    assert _icd10_reason_codes({"mappings": [mapping]}) == ["J95.811"]
+
+
+def test_a_non_icd10_structured_term_falls_through_to_the_display():
+    """A mapping can carry a materialised non-ICD term AND an ICD-10 display; dropping the whole
+    mapping on the first miss would lose the code the order actually needs."""
+    mapping = {"display": "ICD-10: J93.9",
+               "conceptReferenceTerm": {"code": "36118008", "conceptSource": {"name": "SNOMED CT"}}}
+    assert _icd10_reason_codes({"mappings": [mapping]}) == ["J93.9"]
+
+
+def test_malformed_displays_contribute_nothing_and_never_raise():
+    junk = {"mappings": [
+        {"display": None},
+        {"display": "no-colon-at-all"},
+        {"display": "ICD-10:"},
+        {"display": "ICD-10:    "},
+        {"display": ": J93.9"},
+        {"display": "ICD-10:  J93.0  "},
+    ]}
+    assert _icd10_reason_codes(junk) == ["J93.0"]
+
+
+def test_display_mappings_dedup_and_keep_order():
+    mappings = [{"display": "ICD-10-CM: J95.811"}, {"display": "ICD-10-WHO: J93.9"},
+                {"display": "ICD-10: J95.811"}]
+    assert _icd10_reason_codes({"mappings": mappings}) == ["J95.811", "J93.9"]
+
+
+def test_a_live_shaped_order_resolves_with_its_reason_codes_end_to_end():
+    """The regression that mattered: ten STAT pneumothorax studies resolved WITHOUT reasonCode on
+    the demo host, so triage never applied the +25 promotion and the cohort topped out at URGENT."""
+    out = _resolve(_order({"mappings": LIVE_DISPLAY_MAPPINGS}))
+    assert out["reasonCode"] == ["J95.811"]
+    assert out["priority"] == "stat"
