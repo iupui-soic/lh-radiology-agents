@@ -1,0 +1,32 @@
+{
+  "resourceType": "DiagnosticReport",
+  "id": "report-cxr-001",
+  "status": "final",
+  "category": [
+    {
+      "coding": [
+        {
+          "system": "http://terminology.hl7.org/CodeSystem/v2-0074",
+          "code": "RAD",
+          "display": "Radiology"
+        }
+      ]
+    }
+  ],
+  "code": {
+    "text": "CHEST AP"
+  },
+  "subject": {
+    "reference": "Patient/demo-cxr"
+  },
+  "effectiveDateTime": "2026-06-27T12:00:00Z",
+  "issued": "2026-06-27T12:40:00Z",
+  "performer": [
+    {
+      "reference": "Practitioner/demo-radiologist",
+      "display": "Dr. Demo Radiologist"
+    }
+  ],
+  "result": [],
+  "conclusion": "INDICATION: Acute dyspnoea, evaluate for pneumothorax.\nFINDINGS: Large left-sided pneumothorax with mediastinal shift to the right. No rib fracture.\nIMPRESSION: Large left tension pneumothorax. Immediate decompression advised."
+}

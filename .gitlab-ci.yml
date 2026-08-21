@@ -76,6 +76,27 @@ worklist-api-tests:
     - pip install -e libs/radagent-common pytest pytest-asyncio fastapi httpx
     - cd integrations/worklist-api && python -m pytest -q
 
+walking-skeleton:
+  # The whole-pipeline check CLAUDE.md offers ran in NO lane. agent-tests loops agents/*/, and
+  # nothing pointed at mocks/ -- so the harness that #118 found reporting green over a hop that
+  # failed five times out of five, and that #125 found replaying one scenario five times, was
+  # never executed by CI at all. Same "a guard CI never runs is not a guard" rationale as the
+  # worklist-api and mimic-etl lanes.
+  #
+  # Two things run here, and they check different halves. The suite pins that the five fixtures
+  # stay DIFFERENTIATED (#125); the skeleton run itself is the end-to-end contract check and, per
+  # !168, exits non-zero on a failed channel instead of printing "All hops validated" over it.
+  #
+  # No EHR_INBOX_WRITE_ENABLED: the flag-off default is the path most contributors run, and
+  # _DemoFhir mirrors the real client by short-circuiting with zero I/O when it is unset (#118).
+  extends: .default-rules
+  stage: test
+  image: python:3.11-slim
+  script:
+    - pip install -e libs/radagent-common pytest pytest-asyncio
+    - python -m pytest mocks/tests -q
+    - python mocks/run_walking_skeleton.py
+
 mimic-etl-tests:
   # The MIMIC-CXR ETL tooling (scripts/mimic, #68/#76) ran in NO lane before this: agent-tests loops
   # agents/*/, the ris-poller lane lists lib files explicitly, and nothing pointed at scripts/mimic.
