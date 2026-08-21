@@ -46,11 +46,5 @@
         }
       ]
     }
-  ],
-  "extension": [
-    {
-      "url": "criticalFlags",
-      "valueString": "[{\"label\": \"aortic dissection\", \"severity\": \"critical\"}]"
-    }
   ]
 }

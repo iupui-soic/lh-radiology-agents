@@ -1,0 +1,32 @@
+{
+  "resourceType": "DiagnosticReport",
+  "id": "report-mammo-001",
+  "status": "final",
+  "category": [
+    {
+      "coding": [
+        {
+          "system": "http://terminology.hl7.org/CodeSystem/v2-0074",
+          "code": "RAD",
+          "display": "Radiology"
+        }
+      ]
+    }
+  ],
+  "code": {
+    "text": "MAMMOGRAM BILATERAL SCREENING"
+  },
+  "subject": {
+    "reference": "Patient/demo-mammo"
+  },
+  "effectiveDateTime": "2026-06-27T13:00:00Z",
+  "issued": "2026-06-27T13:35:00Z",
+  "performer": [
+    {
+      "reference": "Practitioner/demo-radiologist",
+      "display": "Dr. Demo Radiologist"
+    }
+  ],
+  "result": [],
+  "conclusion": "INDICATION: Routine bilateral screening mammography.\nFINDINGS: Breast density: ACR category B (scattered fibroglandular density). No suspicious mass, architectural distortion or malignant-type calcification in either breast.\nIMPRESSION: Negative screening mammogram. BI-RADS 1. Routine annual screening recommended."
+}

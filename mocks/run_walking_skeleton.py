@@ -18,6 +18,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 AGENTS = ROOT / "agents"
+FIXTURES = ROOT / "mocks" / "fixtures"
 sys.path.insert(0, str(ROOT / "libs" / "radagent-common"))
 
 from radagent_common.fhir_models import (  # noqa: E402
@@ -43,9 +44,53 @@ def load_handler(agent_dir: str):
 class _DemoFhir:
     """Stands in for Fhir2Client so the in-process skeleton exercises Impression's real
     report-content fetch (#16) without a live fhir2. The finalized event is lean (no narrative),
-    so the handler fetches the DiagnosticReport `conclusion` from source -- here, this stub."""
-    async def get_report_conclusion(self, diagnostic_report_id: str) -> str:
-        return "CT chest: large left tension pneumothorax."
+    so the handler fetches the DiagnosticReport `conclusion` from source -- here, this stub.
+
+    It reads the `diagnosticreport.*.final.json` fixtures and indexes them by FHIR id, the way
+    the real client addresses them (GET DiagnosticReport/<id>). Before #125 this returned ONE
+    hardcoded pneumothorax narrative and ignored the id it was handed, so all five fixtures were
+    impressed, verified and communicated from the same report: a routine screening mammogram
+    reported a pneumothorax and paged the on-call, every run. Contract validation could not see
+    it, because a constant is schema-valid -- the same shape as #118.
+    """
+
+    def __init__(self) -> None:
+        self._reports: dict[str, dict] = {}
+        self._by_scenario: dict[str, str] = {}
+        for path in sorted(FIXTURES.glob("diagnosticreport.*.final.json")):
+            resource = json.loads(path.read_text())
+            scenario = path.name[len("diagnosticreport."):-len(".final.json")]
+            self._reports[resource["id"]] = resource
+            self._by_scenario[scenario] = resource["id"]
+
+    def report_ref_for(self, scenario: str) -> str:
+        """The report reference for a StudyContext fixture, by filename convention:
+        `studycontext.<scenario>.json` <-> `diagnosticreport.<scenario>.final.json`.
+
+        A missing report fixture is a hard error rather than a fallback to some default report.
+        A fallback is exactly how #125 happened: every scenario silently shared one narrative.
+        """
+        try:
+            return f"DiagnosticReport/{self._by_scenario[scenario]}"
+        except KeyError:
+            raise AssertionError(
+                f"no report fixture for scenario '{scenario}': add "
+                f"mocks/fixtures/diagnosticreport.{scenario}.final.json. Every StudyContext "
+                f"fixture needs its own report, so the skeleton walks distinct scenarios (#125)."
+            ) from None
+
+    async def get_report_conclusion(self, diagnostic_report_id: str) -> str | None:
+        """Mirrors Fhir2Client.get_report_conclusion, including its Optional return: accepts a
+        bare id or a typed reference, and returns None for an empty id, an unknown report, or one
+        with no usable conclusion. The old stub's non-Optional `str` was narrower than the real
+        contract, so the skeleton never walked the None branch the handlers guard against."""
+        if not diagnostic_report_id:
+            return None
+        resource = self._reports.get(diagnostic_report_id.split("/")[-1])
+        if resource is None:
+            return None
+        conclusion = resource.get("conclusion")
+        return conclusion if isinstance(conclusion, str) and conclusion.strip() else None
 
     async def get_service_request(self, ref: str) -> ServiceRequest | None:
         if not ref:
@@ -102,10 +147,18 @@ class _DemoLedger:
         ]
 
 
-async def run_fixture(fixture: Path, handlers: tuple) -> None:
-    """Run and validate every pipeline hop for one StudyContext fixture."""
+async def run_fixture(fixture: Path, handlers: tuple, fhir: "_DemoFhir") -> dict:
+    """Run and validate every pipeline hop for one StudyContext fixture, and return what it
+    produced.
+
+    The return value exists so the #125 differentiation tests can assert on THIS function rather
+    than re-deriving the pipeline themselves. A test that rebuilt the report reference on its own
+    passed while the constant `DiagnosticReport/demo-1` was still here -- it never executed the
+    line that carried the bug. The harness and its guard have to walk the same code.
+    """
     ctx = json.loads(fixture.read_text())
     wf = ctx["workflowId"]
+    scenario = fixture.name[len("studycontext."):-len(".json")]
     triage, ehr, interp, impression, verify, comms = handlers
 
     # 1) Pre-read fan-out (triage ‖ ehr ‖ interpretation)
@@ -118,8 +171,11 @@ async def run_fixture(fixture: Path, handlers: tuple) -> None:
         validate_skill_output(skill, out)
 
     # 2) (radiologist signs report in RIS — simulated finalized event)
+    # The id is per-scenario (#125). It used to be the constant "DiagnosticReport/demo-1" for
+    # every fixture, which -- together with a stub that ignored the id -- collapsed everything
+    # downstream of this point onto one narrative.
     report_event = {"schemaVersion": "1.0.0", "eventType": "ris.report.finalized",
-                    "diagnosticReportId": "DiagnosticReport/demo-1", "status": "final",
+                    "diagnosticReportId": fhir.report_ref_for(scenario), "status": "final",
                     "lastUpdatedCursor": "2026-06-26T12:30:00Z"}
 
     # 3) Impression
@@ -153,9 +209,15 @@ async def run_fixture(fixture: Path, handlers: tuple) -> None:
         f"{result['channel']}:{result.get('status', '?')}" for result in channel_results
     ) or "none"
     failed_channels = [r["channel"] for r in channel_results if r.get("status") == "FAILED"]
+    # Labels contain spaces ("aortic dissection"), and every other field on this line is a
+    # space-free key=value pair, so spaces are collapsed rather than left to break the pattern a
+    # reader (or a grep) uses to scan it.
+    flags = ",".join(
+        "-".join(f["label"].split()) for f in imp.get("criticalFlags", [])
+    ) or "none"
     print(
         f"{fixture.name}: workflow={wf} triage={t['priorityTier']} "
-        f"tools={tools} verification={ver['verificationStatus']} "
+        f"tools={tools} critical={flags} verification={ver['verificationStatus']} "
         f"comms={dispatch['dispatchStatus']} channels={channels}"
     )
     # A delivery that did not happen is a failed hop, even though comms.dispatch is CORRECT to
@@ -165,6 +227,17 @@ async def run_fixture(fixture: Path, handlers: tuple) -> None:
         raise AssertionError(
             f"channel delivery failed: {', '.join(failed_channels)}"
         )
+    return {
+        "scenario": scenario,
+        "workflowId": wf,
+        "reportRef": report_event["diagnosticReportId"],
+        "triageTier": t["priorityTier"],
+        "tools": tuple(tool["toolId"] for tool in a["toolsSelected"]),
+        "criticalFlags": tuple(sorted(f["label"] for f in imp.get("criticalFlags", []))),
+        "verificationStatus": ver["verificationStatus"],
+        "dispatchStatus": dispatch["dispatchStatus"],
+        "channels": {r["channel"]: r.get("status") for r in channel_results},
+    }
 
 
 async def main() -> int:
@@ -196,7 +269,7 @@ async def main() -> int:
     failures = 0
     for fixture in fixtures:
         try:
-            await run_fixture(fixture, handlers)
+            await run_fixture(fixture, handlers, demo_fhir)
         except Exception as exc:
             failures += 1
             print(f"{fixture}: FAILED: {exc}", file=sys.stderr)

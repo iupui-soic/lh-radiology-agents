@@ -1,0 +1,32 @@
+{
+  "resourceType": "DiagnosticReport",
+  "id": "report-demo-001",
+  "status": "final",
+  "category": [
+    {
+      "coding": [
+        {
+          "system": "http://terminology.hl7.org/CodeSystem/v2-0074",
+          "code": "RAD",
+          "display": "Radiology"
+        }
+      ]
+    }
+  ],
+  "code": {
+    "text": "CT CHEST W/O CONTRAST"
+  },
+  "subject": {
+    "reference": "Patient/demo-1"
+  },
+  "effectiveDateTime": "2026-06-26T12:00:00Z",
+  "issued": "2026-06-26T12:30:00Z",
+  "performer": [
+    {
+      "reference": "Practitioner/demo-radiologist",
+      "display": "Dr. Demo Radiologist"
+    }
+  ],
+  "result": [],
+  "conclusion": "INDICATION: Follow-up of an incidental lung finding.\nFINDINGS: Stable 4 mm solid nodule in the right lower lobe, unchanged in size and morphology. No lymphadenopathy. No pleural effusion.\nIMPRESSION: Stable solitary pulmonary nodule. Continued routine surveillance."
+}

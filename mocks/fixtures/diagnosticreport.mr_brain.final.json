@@ -1,0 +1,32 @@
+{
+  "resourceType": "DiagnosticReport",
+  "id": "report-brain-001",
+  "status": "final",
+  "category": [
+    {
+      "coding": [
+        {
+          "system": "http://terminology.hl7.org/CodeSystem/v2-0074",
+          "code": "RAD",
+          "display": "Radiology"
+        }
+      ]
+    }
+  ],
+  "code": {
+    "text": "MR BRAIN W/O CONTRAST"
+  },
+  "subject": {
+    "reference": "Patient/demo-brain"
+  },
+  "effectiveDateTime": "2026-06-27T11:00:00Z",
+  "issued": "2026-06-27T11:45:00Z",
+  "performer": [
+    {
+      "reference": "Practitioner/demo-radiologist",
+      "display": "Dr. Demo Radiologist"
+    }
+  ],
+  "result": [],
+  "conclusion": "INDICATION: Known multiple sclerosis, routine surveillance.\nFINDINGS: Stable periventricular and juxtacortical demyelinating plaques. No new or enhancing lesion. No restricted diffusion.\nIMPRESSION: Stable demyelinating disease. No interval change since the prior examination."
+}
