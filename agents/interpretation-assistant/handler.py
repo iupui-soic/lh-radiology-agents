@@ -44,7 +44,7 @@ from registry import select_tools
 
 log = logging.getLogger(__name__)
 
-AGENT_VERSION = "0.5.0"
+AGENT_VERSION = "0.6.0"
 
 # Is this image built with the pixel/model extras? Decided ONCE, at import, by whether the imports
 # succeed -- not discovered over the network mid-study. cxr_model imports torch eagerly for exactly
@@ -196,6 +196,19 @@ _PIXEL_TOOL_SPECS: dict[str, dict[str, str]] = {
     # anyone or escalate sign-off. The display name says "Pleural effusion" (what the head means
     # clinically); the head is spelled exactly as TorchXRayVision names it in model.pathologies.
     "effusion-detect": {"head": "Effusion", "display": "Pleural effusion"},
+    # Rows three and four, completing the set the PI approved on #27 ("all three: effusion,
+    # consolidation and edema", same terms as the effusion row above). Same weights, same forward
+    # pass, same threshold policy -- _score_study already runs the model ONCE per study and every
+    # row reads its own head off that one result, so two more rows cost no extra inference.
+    #
+    # Both are NON-CRITICAL, like effusion and deliberately so. impression-generation scans each
+    # COMPLETE finding LABEL against _CRITICAL_KEYWORDS (#26), so a display string is load-bearing
+    # here: neither "Consolidation" nor "Pulmonary edema" contains a keyword from that list, so a
+    # positive reaches the worklist, the viewer and the pre-sign draft without ever opening an ack
+    # clock. Paging stays deterministic off report text (#78). Check that list before adding a row
+    # whose display names a finding that IS critical.
+    "consolidation-detect": {"head": "Consolidation", "display": "Consolidation"},
+    "edema-detect": {"head": "Edema", "display": "Pulmonary edema"},
 }
 
 # The set view of the table, for the audit path (_tool_version): pixel tools are exactly its rows.

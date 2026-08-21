@@ -46,8 +46,13 @@ def _pixels_on(monkeypatch, *, effusion_p, pneumothorax_p=0.10):
     monkeypatch.setattr(handler, "PIXEL_TOOLING", True)
     monkeypatch.setattr(handler, "OrthancClient", lambda: _FakeOrthanc())
     monkeypatch.setattr(handler, "dicom_to_greyscale", lambda b: [[0, 1], [2, 3]])
+    # Consolidation/Edema present at a quiet negative: their rows are selected on every chest
+    # CR/DX too, and a head missing from this dict is an honest ERROR rather than a silent skip.
+    # Leaving them out kept these tests green over two rows that were erroring -- the same shape
+    # as the walking-skeleton defect in #118.
     monkeypatch.setattr(handler, "score",
-                        lambda arr: {"Pneumothorax": pneumothorax_p, "Effusion": effusion_p})
+                        lambda arr: {"Pneumothorax": pneumothorax_p, "Effusion": effusion_p,
+                                     "Consolidation": 0.10, "Edema": 0.10})
 
 
 def _eff(out):

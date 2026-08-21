@@ -67,10 +67,13 @@ def _pixels_on(monkeypatch, *, pneumothorax_p):
     monkeypatch.setattr(handler, "PIXEL_TOOLING", True)
     monkeypatch.setattr(handler, "OrthancClient", lambda: _FakeOrthanc())
     monkeypatch.setattr(handler, "dicom_to_greyscale", lambda b: [[0, 1], [2, 3]])
-    # Effusion rides along at a quiet negative so the second spec row (effusion-detect, selected on
-    # every chest CR/DX) stays STUBBED and these tests keep describing pneumothorax-detect alone.
+    # Every OTHER pixel-tool head rides along at a quiet negative, so those rows stay STUBBED and
+    # these tests keep describing pneumothorax-detect alone. The heads must all be PRESENT: a row
+    # whose head is missing from the dict is an honest ERROR (the design), which would make these
+    # tests fail for a reason that has nothing to do with pneumothorax.
     monkeypatch.setattr(handler, "score",
-                        lambda arr: {"Pneumothorax": pneumothorax_p, "Effusion": 0.10, "Nodule": 0.10})
+                        lambda arr: {"Pneumothorax": pneumothorax_p, "Effusion": 0.10,
+                                     "Consolidation": 0.10, "Edema": 0.10, "Nodule": 0.10})
 
 
 def _ptx(out):
