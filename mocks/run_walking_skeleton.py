@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -54,6 +55,23 @@ class _DemoFhir:
             subject=Reference(reference="Patient/demo-1"),
             requester=Reference(reference="Practitioner/demo-ordering"),
         )
+
+    async def write_critical_result_notification(
+        self, *, patient_ref: str, finding: str, accession: str,
+        ack_task_id: str, sent_iso: str,
+    ) -> str | None:
+        """The #79 ehr-inbox chart write (#118). Without this the CRITICAL dispatch path raised
+        AttributeError on every fixture -- swallowed by tools.deliver_critical_result_to_chart's
+        never-raise contract into a FAILED channel, which the summary then dropped. The skeleton
+        stayed green over a hop that failed five times out of five.
+
+        Mirrors the real client's contract, flag included: None WITHOUT any I/O when
+        EHR_INBOX_WRITE_ENABLED is off (the default), so the skeleton's default run exercises the
+        same short-circuit production takes. Flag on, it returns an id like a landed write, which
+        is what makes the flag-on path reachable in-process at all."""
+        if os.environ.get("EHR_INBOX_WRITE_ENABLED", "").strip().lower() not in {"1", "true", "yes"}:
+            return None
+        return f"demo-observation-{accession}"
 
 
 class _DemoLedger:
@@ -127,14 +145,26 @@ async def run_fixture(fixture: Path, handlers: tuple) -> None:
     validate_skill_output("comms.dispatch", dispatch)
 
     tools = ",".join(tool["toolId"] for tool in a["toolsSelected"]) or "none"
+    # channel:STATUS, not the bare channel name (#118). The schema accepts "FAILED" as a valid
+    # value, so contract validation can never be the signal here -- printing the status is what
+    # makes a failed hop visible at all.
+    channel_results = dispatch.get("channelResults", [])
     channels = ",".join(
-        result["channel"] for result in dispatch.get("channelResults", [])
+        f"{result['channel']}:{result.get('status', '?')}" for result in channel_results
     ) or "none"
+    failed_channels = [r["channel"] for r in channel_results if r.get("status") == "FAILED"]
     print(
         f"{fixture.name}: workflow={wf} triage={t['priorityTier']} "
         f"tools={tools} verification={ver['verificationStatus']} "
         f"comms={dispatch['dispatchStatus']} channels={channels}"
     )
+    # A delivery that did not happen is a failed hop, even though comms.dispatch is CORRECT to
+    # report it instead of raising (a raise would retry the activity and double-page the human).
+    # The skeleton is the only place left that can turn that status back into a red run.
+    if failed_channels:
+        raise AssertionError(
+            f"channel delivery failed: {', '.join(failed_channels)}"
+        )
 
 
 async def main() -> int:
