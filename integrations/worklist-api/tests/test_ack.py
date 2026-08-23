@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import httpx
 import html as html_mod
+import pathlib
 import re
 from urllib.parse import urljoin
 
@@ -343,3 +344,46 @@ def test_get_on_an_already_acknowledged_task_shows_the_done_page_not_a_button(ri
     assert r.status_code == 200
     assert "<form" not in r.text
     assert ledger.completed == []
+
+
+# --- #126: the deployment condition the session path depends on ------------------------------
+#
+# The four session tests above hand a JSESSIONID straight to the endpoint, so they pass whether
+# or not a real browser would ever send one. On the demo host it never did: OpenMRS scopes the
+# cookie to `Path=/openmrs` and the ack was routed at `/reading-api/ack/*`, so `whoami_session`
+# was unreachable in production while fully covered in the suite. Every acknowledgement silently
+# took the Basic path, which reads identity from the browser's credential store rather than from
+# the clinician. These two tests pin the ROUTING, which is the part the mocks cannot see.
+
+_CADDYFILE = (
+    pathlib.Path(__file__).resolve().parents[3] / "docker" / "caddy" / "Caddyfile"
+)
+_RUNBOOK = (
+    pathlib.Path(__file__).resolve().parents[3] / "docs" / "showcase-runbook.md"
+)
+
+
+def test_the_ack_route_is_served_under_the_jsessionid_cookie_path():
+    """OpenMRS sets `JSESSIONID=...; Path=/openmrs`, so only a route under /openmrs receives it."""
+    caddyfile = _CADDYFILE.read_text()
+    assert "handle /openmrs/ack/*" in caddyfile, (
+        "the ack surface must be served under /openmrs so the browser sends JSESSIONID; "
+        "without it whoami_session is dead code in production and every ack falls back to Basic"
+    )
+    # and it has to be matched BEFORE the catch-all /openmrs/* proxy to OpenMRS, or the app
+    # swallows it and the ack 404s -- the same ordering the vendor-assets override needs.
+    assert caddyfile.index("handle /openmrs/ack/*") < caddyfile.index("handle /openmrs/* {"), (
+        "/openmrs/ack/* must precede /openmrs/* or Caddy routes the ack to OpenMRS itself"
+    )
+
+
+def test_the_runbook_configures_the_ack_base_url_under_openmrs():
+    """The route alone is not enough: the minted link has to point at it.
+
+    `CRITCOM_ACK_BASE_URL` is what `communications` stamps into the chart notification, so a
+    correct route with a /reading-api base URL still produces Basic-path links.
+    """
+    runbook = _RUNBOOK.read_text()
+    assert "CRITCOM_ACK_BASE_URL=https://demo.example.org/openmrs" in runbook, (
+        "the run-book's setup step must configure the ack base URL under /openmrs (#126)"
+    )

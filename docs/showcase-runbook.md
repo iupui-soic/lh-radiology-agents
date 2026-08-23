@@ -18,7 +18,7 @@ origin the #75 Caddy overlay serves. Nothing else is reachable off-box.
 | RIS order page (read-only) | `https://demo.example.org/openmrs/module/radiology/radiologyOrder.form?orderId=<uuid>` — reached via the viewer's **Report this study** action. Shows the order only: despite what this row used to claim, the pre-sign draft is **not** rendered here (verified 2026-08-20), so arc 2's "look, the AI already drafted" beat has to happen on the report form. It carries **no claim button** on this build (#109), and its "View Study" link points at a `localhost:8081` Weasis URL that is dead from any reviewer's browser: ignore it, the viewer is the `/read` route | OpenMRS session |
 | RIS report form (claim, author, sign) | **Depends on whether the study has an AI draft.** No COMPLETE finding: `…/radiologyReport.form?orderId=<uuid>` **is the claim** — it creates the draft and redirects to `?reportId=<n>`. Any COMPLETE finding (so ~45 of the cohort): that same URL throws an OpenMRS crash page, `cannot.create.already.claimed`, because ris-presign-bridge already made the draft — open `…/radiologyReport.form?reportId=<n>` instead. **Nothing in the UI tells you `<n>`** (#120): the Radiology → Reports list shows 0 of 0 because every AI draft has a NULL interpreter. Look it up before the session, see §1.7 | OpenMRS session |
 | Patient chart (referring MD) | `https://demo.example.org/openmrs` → find patient → chart shows the **AI critical result notification** entry | physician's own OpenMRS account |
-| Critical-result ack (phone) | `https://demo.example.org/reading-api/ack/<taskId>?sig=…` — the signed link inside the chart notification | physician's OpenMRS account (live session if the link sits under `/openmrs`, else an HTTP Basic prompt) |
+| Critical-result ack (phone) | `https://demo.example.org/openmrs/ack/<taskId>?sig=…` — the signed link inside the chart notification. Under `/openmrs` since #126, which is what lets it reuse the physician's session; links minted before that carry `/reading-api/ack/…` and still work, on the Basic path | physician's OpenMRS account (live session, else an HTTP Basic prompt) |
 | Sign-off override (phone) | `https://demo.example.org/ingress/signoff/<workflowId>/override` — the link inside the escalation page | `SIGNOFF_OVERRIDE_TOKEN` |
 | Jaeger (choreography visual) | presenter laptop: `ssh -L 16686:127.0.0.1:16686 demo@<host>` → `http://localhost:16686` | SSH only (loopback-bound on the host) |
 | Temporal UI (backstage only) | tunnel `8088` the same way → `http://localhost:8088` | SSH only |
@@ -34,12 +34,14 @@ origin the #75 Caddy overlay serves. Nothing else is reachable off-box.
 2. #68 cohort loaded (FHIR → DICOM → `link_radiology_studies.py`), referring physicians seeded (!97).
 3. Flags on, each with its recorded sign-off: `ORTHANC_PRESIGN_WRITE_ENABLED=1`,
    `EHR_INBOX_WRITE_ENABLED=1`, `PATCH_PRESIGN_IMPRESSION`, `CRITCOM_ACK_HMAC_SECRET` set and
-   `CRITCOM_ACK_BASE_URL=https://demo.example.org/reading-api`, LLM keys for impression/comms
+   `CRITCOM_ACK_BASE_URL=https://demo.example.org/openmrs`, LLM keys for impression/comms
    prose (both degrade to deterministic text if unset). `CRITCOM_ACK_HMAC_SECRET` must be the
    SAME value on `communications` (which signs the link) and `worklist-api` (which verifies it);
-   both read it, and verification fails closed when it is empty. The `/reading-api` base URL
-   means the ack asks for a login rather than reusing the physician's OpenMRS session: see arc
-   2 step 6 for why, and what to change if you want the one-click path.
+   both read it, and verification fails closed when it is empty. The base URL must end in
+   `/openmrs` (#126): that is the path OpenMRS scopes `JSESSIONID` to, so it is what lets the
+   ack reuse the physician's own session instead of prompting for a login and taking whatever
+   identity the browser has saved. A `/reading-api` base URL still functions but reintroduces
+   that failure; see arc 2 step 6.
 3a. LLM hosting decision (#77, recorded 2026-08-11, corrected 2026-08-19 by the PI): the
    impression-prose model is an OpenAI-chat-completions endpoint chosen by config, and two
    postures are authorized. (a) The Gemini API with Zero Data Retention enabled: the PI confirms
@@ -151,7 +153,7 @@ origin the #75 Caddy overlay serves. Nothing else is reachable off-box.
    physician): the **AI critical result notification** entry is on the chart — finding label +
    accession + the signed ack link, never the narrative.
 6. **Phone on camera:** tap the ack link
-   (`https://demo.example.org/reading-api/ack/<taskId>?sig=…`). Two taps, by design (!114):
+   (`https://demo.example.org/openmrs/ack/<taskId>?sig=…`). Two taps, by design (!114):
    the link opens a **confirmation page** naming who the acknowledgement will be attributed
    to, and only the **Acknowledge** button on it attests. Opening the link never acknowledges
    anything, so a preloading browser, a restored tab or a scanner cannot attest on the
@@ -159,11 +161,19 @@ origin the #75 Caddy overlay serves. Nothing else is reachable off-box.
    - **Identity comes first, and how depends on the route.** The signature is checked before
      any credential is solicited, so a forged link 403s without ever prompting. Then, if the
      browser sends a live OpenMRS `JSESSIONID`, the page is one click with no login. It only
-     sends that cookie when the ack URL rides under the cookie's `/openmrs` path, and
-     `CRITCOM_ACK_BASE_URL` currently points at `/reading-api`, so **on the host today expect
-     the HTTP Basic prompt first**, then the confirmation page. That is the supported
-     fallback, not a fault. To demo the one-click path instead, route the ack under
-     `/openmrs` and point `CRITCOM_ACK_BASE_URL` there.
+     sends that cookie when the ack URL rides under the cookie's `/openmrs` path. Since #126
+     the ack IS routed there (`/openmrs/ack/*` in the Caddyfile, with
+     `CRITCOM_ACK_BASE_URL=https://<host>/openmrs`), so **expect one click from an
+     authenticated chart session, with no login prompt.**
+   - **If you get a Basic prompt, stop and read the name on the confirmation page.** It means
+     the cookie did not arrive (an old `/reading-api/ack/...` link minted before #126, a link
+     opened outside the EHR, or an expired session), so identity has fallen back to HTTP
+     Basic. Basic credentials come from the BROWSER's store, not from the person holding the
+     phone, so a saved login for another clinician is offered silently. That is exactly what
+     happened in the 2026-08-23 rehearsal: signed into the RIS as the ordering physician, the
+     ack page offered a different physician entirely, one click from recording them as the
+     acknowledger and cancelling the on-call escalation. The page names who it will attribute
+     to. Read it before tapping.
 7. **Close the loop verbally:** the ledger Task is COMPLETED with the acknowledger's identity on
    it, `comms.checkAck` reads COMPLETED, no escalation fires. (Backstage proof if asked:
    Temporal UI over the tunnel, the workflow's `ackStatus`.)

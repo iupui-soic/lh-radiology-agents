@@ -28,6 +28,29 @@
 		file_server
 	}
 
+	# Critical-result ack surface (#79), served UNDER /openmrs on purpose (#126). Must precede
+	# the /openmrs/* handle, same as the vendor override above.
+	#
+	# The path is the whole point. OpenMRS issues `JSESSIONID` with `Path=/openmrs; HttpOnly`,
+	# so a browser sends that cookie to /openmrs/ack/... and NOT to the /reading-api/ack/...
+	# this used to live at. With the cookie, ack.py resolves the acknowledging physician from
+	# their live OpenMRS session (`whoami_session`) and the chart click is one tap with no
+	# second login. Without it, every acknowledgement fell through to HTTP Basic, and Basic
+	# takes its identity from the BROWSER's credential store rather than from the clinician:
+	# in the 2026-08-23 rehearsal a saved credential for a physician uninvolved in the study
+	# was offered as the acknowledger of someone else's critical result. The extra prompt was
+	# the visible cost; the attribution was the real one.
+	#
+	# `/openmrs/ack` is not an OpenMRS route (the app serves /openmrs/ws, /openmrs/module,
+	# /openmrs/index.htm and friends), so this shadows nothing. Still outside the proxy login,
+	# because /openmrs/* deliberately is -- the constraint the old comment named is preserved,
+	# not traded away. The HMAC sig gate still 403s a forged link before any credential is
+	# solicited or any session consulted.
+	handle /openmrs/ack/* {
+		uri strip_prefix /openmrs
+		reverse_proxy worklist-api:8107
+	}
+
 	# RIS + fhir2. Deliberately NOT behind the proxy login: OpenMRS enforces its own accounts
 	# (radiologists sign under their own identity, #75 item 4), and the agents' fhir2 calls on
 	# this same route authenticate with FHIR2_BASIC_* against fhir2 itself. Stacking the proxy
@@ -44,12 +67,17 @@
 		reverse_proxy orchestrator:8090
 	}
 
-	# Critical-result ack surface (#79): like the override, tapped from a paged clinician's
-	# PHONE, so it cannot sit behind the proxy login -- Basic carries ONE credential and the
-	# ack endpoint needs it to be the tapper's own OpenMRS account (that is the attribution).
-	# Safe outside the proxy login: the HMAC sig gate 403s any forged/enumerated link before
-	# a password prompt is ever offered. Same strip as OHIF's nginx fan-out, so worklist-api
-	# sees the /ack/... path it serves in-cluster.
+	# LEGACY ack route (#79), kept for links already sitting in charts (#126). New notifications
+	# are minted under /openmrs/ack, but every Observation written before that change carries a
+	# /reading-api/ack/... link, and those are the notifications for results not acknowledged
+	# YET -- exactly the ones that must stay tappable. Removing this would break the open half
+	# of the loop in order to fix the closed half.
+	#
+	# An ack arriving here still works; it just takes the Basic path, because JSESSIONID is
+	# scoped to /openmrs and never reaches this prefix. That is the pre-#126 behaviour, left
+	# deliberately unchanged for old links rather than silently upgraded.
+	#
+	# Retire once no unacknowledged notification carries the old path.
 	handle /reading-api/ack/* {
 		uri strip_prefix /reading-api
 		reverse_proxy worklist-api:8107
