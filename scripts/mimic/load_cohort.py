@@ -131,9 +131,15 @@ def main(argv=None) -> int:
         try:
             r = load_study(c, s, args.concept)
             ok += 1
+            # meds is printed alongside labs and problems (#80). It was counted into the summary
+            # and then dropped from the operator's line, so a run where every drug order silently
+            # failed read exactly like a run where they all landed. The med path is the newest and
+            # the most deployment-sensitive of the three (it goes in via SQL, not fhir2), which
+            # makes it the one that most needs a number in front of a human.
             print(f"loaded {r['study_id']} acc={r['accession']} order={r['order']} "
                   f"req={r.get('referrer', '-')} "
-                  f"labs={r['ehr']['labs']} problems={r['ehr']['problems']}")
+                  f"labs={r['ehr']['labs']} problems={r['ehr']['problems']} "
+                  f"meds={r['ehr']['meds']}")
         except Exception as e:  # noqa: BLE001
             print(f"FAILED {s.study_id}: {e}")
     c.close()

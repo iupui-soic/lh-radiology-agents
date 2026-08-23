@@ -47,6 +47,12 @@ class _FakeClient:
     def __init__(self):
         self.calls = []
 
+    def close(self):
+        # main() closes the client, so the fake needs it too. Same lesson as #118's _DemoFhir: a
+        # fake narrower than the real contract turns a whole-CLI test into an AttributeError, and
+        # the missing method is never the thing under test.
+        self.calls.append(("close",))
+
     def create_patient(self, subject_id, gender="U"):
         self.calls.append(("patient", subject_id)); return f"pat-{subject_id}"
 
@@ -342,3 +348,21 @@ def test_clamp_conclusion_keeps_tail_when_findings_alone_too_long():
     out = clamp_conclusion(text)
     assert len(out) == FHIR2_CONCLUSION_MAX
     assert out.endswith("IMPRESSION:\n 1. Effusion.")
+
+
+def test_the_load_line_reports_the_meds_count(capsys, monkeypatch):
+    """#80 AC3: meds has to reach the OPERATOR's line, not just the summary dict.
+
+    The count was tracked and then left out of the print, so a run where every drug order failed
+    was byte-identical to one where they all landed. Asserting on stdout rather than on the return
+    value is the point: the return value already carried the number when the line did not.
+    """
+    import load_cohort
+    monkeypatch.setattr(load_cohort, "OmrsClient", lambda *a, **k: _FakeClient())
+    rc = load_cohort.main([str(SAMPLE), "--concept", "concept-uuid"])
+    out = capsys.readouterr().out
+    line = next(ln for ln in out.splitlines() if ln.startswith("loaded s90000002 "))
+    assert "meds=1" in line, line
+    # the neighbours stay on the line, so this did not trade one field for another
+    assert "labs=" in line and "problems=1" in line
+    assert rc == 0
