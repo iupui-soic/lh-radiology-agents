@@ -6,6 +6,7 @@ Run: python scripts/validate_contracts.py
 """
 from __future__ import annotations
 import json
+import re
 import sys
 from pathlib import Path
 import yaml
@@ -29,13 +30,47 @@ for sf in schema_files:
     except Exception as e:  # noqa: BLE001
         errors.append(f"[schema invalid] {sf.relative_to(ROOT)}: {e}")
 
-# 2. All agent cards parse as JSON and carry the minimum fields.
+# 2. All agent cards parse as JSON, carry the minimum fields, and advertise the version their
+#    agent actually stamps on its results (#124).
+#
+#    The two fields are not redundant. `AGENT_VERSION` is contractual: it is `required` on every
+#    skill output schema, so it stamps each result with the build that produced it. The card's
+#    `version` is what the agent ADVERTISES over A2A at /.well-known/agent-card.json. Until this
+#    check they drifted freely -- interpretation-assistant's card said 0.1.0 from the initial
+#    import while its handler had moved through six minor versions, so a peer resolving the card
+#    was told 0.1.0 while every payload it got back was stamped 0.6.0. Nothing reads the card
+#    version at runtime today, so nothing was broken; the cost was to the audit story, which is
+#    the same story `_tool_version` exists to serve.
+#
+#    Parsed by regex rather than import: a handler must stay importable without its siblings on
+#    sys.path, and importing one here would drag agent deps into the CI gate (golden rule 4 keeps
+#    handlers free of a2a.*, and this keeps the validator free of handlers).
+#
+#    KNOWN LIMIT, do not mistake this for more than it is: this catches the two fields
+#    DISAGREEING. It cannot catch both being stale together. An agent whose behaviour changes
+#    without anyone bumping AGENT_VERSION stays permanently "in sync" and permanently wrong. When
+#    to bump is a discipline no gate here enforces (PI note on #124).
+_AGENT_VERSION_RE = re.compile(r'^AGENT_VERSION\s*=\s*["\']([^"\']+)["\']', re.M)
+
 for cf in sorted((CONTRACTS / "cards").glob("*.json")):
     try:
         card = _load(cf)
         for key in ("name", "url", "version", "skills"):
             if key not in card:
                 errors.append(f"[card missing '{key}'] {cf.relative_to(ROOT)}")
+        # Cards with no matching agent directory are skipped, not failed: a card may legitimately
+        # describe an agent that does not live in this repo.
+        handler_py = ROOT / "agents" / cf.stem / "handler.py"
+        if "version" in card and handler_py.exists():
+            m = _AGENT_VERSION_RE.search(handler_py.read_text())
+            if m is None:
+                errors.append(
+                    f"[card version unverifiable] {cf.relative_to(ROOT)}: no AGENT_VERSION in "
+                    f"{handler_py.relative_to(ROOT)}")
+            elif m.group(1) != card["version"]:
+                errors.append(
+                    f"[card version drift] {cf.relative_to(ROOT)}: card says "
+                    f"{card['version']}, {handler_py.relative_to(ROOT)} stamps {m.group(1)}")
     except Exception as e:  # noqa: BLE001
         errors.append(f"[card invalid json] {cf.relative_to(ROOT)}: {e}")
 
