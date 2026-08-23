@@ -2,7 +2,7 @@
   "name": "Interpretation Assistant Agent",
   "description": "Selects and runs AI/CAD tools for a study and surfaces findings with evidence references; each finding reports its level of reality (pixel model, referral-reason rule, or stub).",
   "url": "http://interpretation-assistant:8103/",
-  "version": "0.1.0",
+  "version": "0.6.0",
   "capabilities": { "streaming": true, "pushNotifications": true },
   "defaultInputModes": ["application/json"],
   "defaultOutputModes": ["application/json"],
