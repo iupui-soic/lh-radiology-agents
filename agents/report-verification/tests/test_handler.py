@@ -297,3 +297,113 @@ async def test_verify_calls_do_not_reload_the_rule_library(monkeypatch):
         })
         validate_skill_output("report.verify", out)
         assert out["verificationStatus"] == "PASS"
+
+
+# --- anticoagulant-bleed-unaddressed (#80): the medication packet reaching a verification rule. --
+#     The three live rows this rule was built against, taken off the #68 cohort on 2026-08-23:
+#     hemothorax + warfarin (fires), hematoma + enoxaparin (fires), and "bleed" on a patient with
+#     no medications at all (silent). That third row is the negative control and it is the reason
+#     the rule keys on the flag rather than on the finding alone.
+
+_ANTICOAG = {"medicationFlags": {"onAnticoagulant": True}}
+_NO_ANTICOAG = {"medicationFlags": {"onAnticoagulant": False}}
+
+
+async def test_bleed_on_an_anticoagulated_patient_warns():
+    """Cohort row 1: hemothorax, patient on warfarin, report never mentions the drug."""
+    out = await handle("report.verify", {
+        "studyContext": SAMPLE_CONTEXT,
+        "report": {"conclusion": "FINDINGS: Moderate right hemothorax."},
+        "impression": {"impressionText": "Right hemothorax.", "criticalFlags": [],
+                       "recommendations": [{"text": "Chest CT."}]},
+        "ehrContext": _ANTICOAG,
+    })
+    validate_skill_output("report.verify", out)
+    assert "anticoagulant-bleed-unaddressed" in _rule_ids(out)
+    assert out["verificationStatus"] == "WARN"
+
+
+async def test_the_same_bleed_without_the_flag_is_silent():
+    """Cohort row 3, the negative control: the same class of finding on a patient carrying no
+    medications at all. Without the flag clause this rule would be critical-finding-unflagged with
+    extra words, and it would fire here."""
+    out = await handle("report.verify", {
+        "studyContext": SAMPLE_CONTEXT,
+        "report": {"conclusion": "FINDINGS: Moderate right hemothorax."},
+        "impression": {"impressionText": "Right hemothorax.", "criticalFlags": [],
+                       "recommendations": [{"text": "Chest CT."}]},
+        "ehrContext": _NO_ANTICOAG,
+    })
+    validate_skill_output("report.verify", out)
+    assert "anticoagulant-bleed-unaddressed" not in _rule_ids(out)
+
+
+async def test_a_report_that_addresses_the_anticoagulant_is_silent():
+    """The clause that keeps this rule off a working radiologist's back: once the recommendation
+    raises the drug, the gap the rule exists to surface is closed."""
+    out = await handle("report.verify", {
+        "studyContext": SAMPLE_CONTEXT,
+        "report": {"conclusion": "FINDINGS: Moderate right hemothorax."},
+        "impression": {"impressionText": "Right hemothorax.", "criticalFlags": [],
+                       "recommendations": [{"text": "Hold anticoagulation and recheck INR."}]},
+        "ehrContext": _ANTICOAG,
+    })
+    validate_skill_output("report.verify", out)
+    assert "anticoagulant-bleed-unaddressed" not in _rule_ids(out)
+
+
+async def test_the_drug_named_in_the_impression_prose_also_counts_as_addressed():
+    out = await handle("report.verify", {
+        "studyContext": SAMPLE_CONTEXT,
+        "report": {"conclusion": "FINDINGS: Left chest wall hematoma."},
+        "impression": {"impressionText": "Hematoma, likely related to enoxaparin.",
+                       "criticalFlags": [], "recommendations": []},
+        "ehrContext": _ANTICOAG,
+    })
+    validate_skill_output("report.verify", out)
+    assert "anticoagulant-bleed-unaddressed" not in _rule_ids(out)
+
+
+async def test_a_negated_bleed_does_not_warn():
+    """Same negation discipline as #78: a pertinent negative is not a finding. Every MIMIC normal
+    says something like this, so without the shared window the rule would fire across the cohort."""
+    out = await handle("report.verify", {
+        "studyContext": SAMPLE_CONTEXT,
+        "report": {"conclusion": "IMPRESSION: No hemothorax or pleural effusion."},
+        "impression": {"impressionText": "No acute cardiopulmonary process.",
+                       "criticalFlags": [], "recommendations": []},
+        "ehrContext": _ANTICOAG,
+    })
+    validate_skill_output("report.verify", out)
+    assert "anticoagulant-bleed-unaddressed" not in _rule_ids(out)
+    assert out["verificationStatus"] == "PASS"
+
+
+async def test_an_indication_naming_the_bleed_does_not_warn():
+    """The indication names the SUSPICION. "On warfarin, rule out bleed" is the exact phrasing an
+    anticoagulated patient's order carries, so scanning it would fire the rule on every such study
+    including the normals. Same trap #78 found for critical-finding-unflagged."""
+    out = await handle("report.verify", {
+        "studyContext": SAMPLE_CONTEXT,
+        "report": {"conclusion": ("INDICATION: On warfarin, rule out bleed.\n"
+                                  "FINDINGS: Lungs are clear.\n"
+                                  "IMPRESSION: No acute finding.")},
+        "impression": {"impressionText": "No acute finding.", "criticalFlags": [],
+                       "recommendations": []},
+        "ehrContext": _ANTICOAG,
+    })
+    validate_skill_output("report.verify", out)
+    assert "anticoagulant-bleed-unaddressed" not in _rule_ids(out)
+
+
+async def test_no_ehr_packet_at_all_is_silent():
+    """ehrContext is optional in the skill payload and the EHR hop degrades to an empty packet on a
+    fhir2 outage. A rule that fired on a missing flag would turn every outage into a WARN storm."""
+    out = await handle("report.verify", {
+        "studyContext": SAMPLE_CONTEXT,
+        "report": {"conclusion": "FINDINGS: Moderate right hemothorax."},
+        "impression": {"impressionText": "Right hemothorax.", "criticalFlags": [],
+                       "recommendations": [{"text": "Chest CT."}]},
+    })
+    validate_skill_output("report.verify", out)
+    assert "anticoagulant-bleed-unaddressed" not in _rule_ids(out)
