@@ -379,13 +379,34 @@ async def test_a_negated_bleed_does_not_warn():
     assert out["verificationStatus"] == "PASS"
 
 
-async def test_an_indication_naming_the_bleed_does_not_warn():
+async def test_an_indication_naming_the_bleed_as_the_question_does_not_warn():
     """The indication names the SUSPICION. "On warfarin, rule out bleed" is the exact phrasing an
-    anticoagulated patient's order carries, so scanning it would fire the rule on every such study
-    including the normals. Same trap #78 found for critical-finding-unflagged."""
+    anticoagulated patient's order carries, so firing on it would WARN on every such study
+    including the normals. Note what actually saves this one: the rule-out cue, inside the shared
+    negation window. The section scoping is NOT load-bearing here, which is what the next test is
+    for -- a mutation run proved this case alone passes with the scoping removed."""
     out = await handle("report.verify", {
         "studyContext": SAMPLE_CONTEXT,
         "report": {"conclusion": ("INDICATION: On warfarin, rule out bleed.\n"
+                                  "FINDINGS: Lungs are clear.\n"
+                                  "IMPRESSION: No acute finding.")},
+        "impression": {"impressionText": "No acute finding.", "criticalFlags": [],
+                       "recommendations": []},
+        "ehrContext": _ANTICOAG,
+    })
+    validate_skill_output("report.verify", out)
+    assert "anticoagulant-bleed-unaddressed" not in _rule_ids(out)
+
+
+async def test_a_bleed_asserted_only_in_the_history_does_not_warn():
+    """The scoping half, isolated. A history that ASSERTS a past bleed carries no negation cue, so
+    the negation window cannot suppress it and only scannable_text's section dropping can. This is
+    the common anticoagulated follow-up: the patient bled, it was treated, today's film is clear.
+    Without the scoping the rule WARNs on exactly the studies where the bleed is already known and
+    managed, which is the noise that would get it switched off."""
+    out = await handle("report.verify", {
+        "studyContext": SAMPLE_CONTEXT,
+        "report": {"conclusion": ("HISTORY: Hemothorax, status post chest tube.\n"
                                   "FINDINGS: Lungs are clear.\n"
                                   "IMPRESSION: No acute finding.")},
         "impression": {"impressionText": "No acute finding.", "criticalFlags": [],
