@@ -30,6 +30,22 @@ in a deliberate order:
 4. **The ledger Task closes with WHO on it** (`complete_ack_task`: status COMPLETED + a note
    naming the acknowledger). `comms.checkAck` then reports COMPLETED and the orchestrator's
    escalation never fires — the run-book's "acknowledged in time" arc.
+5. **WHO and WHEN are checked, and stated before the click** (#127, #128). The endpoint used to
+   trust both. It recorded whoever authenticated, without comparing them to the Task's addressee,
+   and it accepted an ack after the window had lapsed, overwriting the FAILED status the
+   escalation had set. Both were reproduced live on 2026-08-23, one after the other, by a
+   physician doing an ordinary thing with a real link.
+   * **Non-addressee**: permitted, because covering physicians, night float and handover are
+     normal and refusing them would push people to acknowledge from a colleague's logged-in
+     browser. Recorded as on-behalf-of, naming BOTH parties, and the confirmation page says so
+     before the button is pressed. Compared on the PROVIDER uuid (`session.currentProvider`), and
+     an unresolvable provider is never treated as a mismatch — see `Caller`.
+   * **Late**: permitted, because a physician who finally reads the notification has still
+     received it and that is worth recording. But an escalation that already fired stands: the
+     Task keeps its FAILED status, the note records the miss and the deadline, and the on-call
+     Task is deliberately left open for on-call to close themselves. The page no longer claims
+     the escalation clock is closed when it is not, which is what made the live reproduction
+     misleading rather than merely wrong.
 
 Still ONE tap on a paged phone: the link opens the confirmation page, and the button on it is
 the tap. What the split buys is that everything which is not a tap — a prefetch, a tab restore,
@@ -46,6 +62,8 @@ from __future__ import annotations
 import base64
 import html
 import logging
+from datetime import datetime, timezone
+from typing import NamedTuple
 from urllib.parse import quote
 
 import httpx
@@ -62,17 +80,41 @@ _log = logging.getLogger("worklist-api.ack")
 _ACKED = (TaskStatus.COMPLETED, TaskStatus.ACCEPTED)
 
 
+class Caller(NamedTuple):
+    """The resolved acknowledger: a display string for the audit note, plus the OpenMRS Provider
+    uuid when the session carries one.
+
+    Two identifier spaces meet here and they are NOT interchangeable. `who` is built from the USER
+    uuid ("Marisol Reyes (29defed0-...)"), while `Task.owner` is a PRACTITIONER reference
+    ("Practitioner/718bc49a-..."). Comparing the two directly always reports a mismatch, and
+    comparing display strings instead would collide for clinicians who share a name (#127).
+
+    `provider_uuid` is None when the session has no `currentProvider`, which is a real state on
+    this deployment rather than an error: a user with no Provider record (admin, service accounts)
+    returns null there, and the direct lookups that would map it -- `/provider?user=` and
+    `/user/<uuid>` -- both 403 under the fleet's least-privilege credentials. So None means
+    "cannot determine", NEVER "not authorised": the ack still lands and the note says the provider
+    was unknown. Refusing on None would lock out exactly the clinicians whose Provider records are
+    missing.
+    """
+    who: str
+    provider_uuid: str | None
+
+
 class OpenmrsIdentity:
     """WHO is acknowledging, per OpenMRS. Both resolvers probe `/ws/rest/v1/session` and return
-    a display string for an authenticated user ("display (uuid)"), or None -- deliberately no
-    distinction between unknown user, wrong password and dead session."""
+    a `Caller`, or None -- deliberately no distinction between unknown user, wrong password and
+    dead session.
+
+    `/ws/rest/v1/session` carries `currentProvider` alongside `user`, so the Provider uuid the
+    owner check needs costs no extra request and no extra privilege (#127)."""
 
     def __init__(self, base_url: str | None = None, timeout: float = 10.0):
         self.base_url = (base_url or rest_base_url()).rstrip("/")
         self._timeout = timeout
 
     @staticmethod
-    def _who(r: httpx.Response, fallback: str = "") -> str | None:
+    def _who(r: httpx.Response, fallback: str = "") -> "Caller | None":
         if r.status_code != 200:
             return None
         body = r.json()
@@ -83,18 +125,22 @@ class OpenmrsIdentity:
         uuid = user.get("uuid") or ""
         if not (display or uuid):
             return None
+        # `currentProvider` is OpenMRS's own answer to "which Provider is this user", already in
+        # this response. Absent/null for a user with no Provider record -- see Caller.
+        provider = body.get("currentProvider") or {}
+        provider_uuid = provider.get("uuid") or None
         if not display:
             # A uuid with no display would render as " (uuid-x)" -- a nameless audit line on
             # the one string that says WHO attested. Name the uuid instead of leading with a
             # blank.
-            return f"unknown user ({uuid})"
-        return f"{display} ({uuid})" if uuid else display
+            return Caller(f"unknown user ({uuid})", provider_uuid)
+        return Caller(f"{display} ({uuid})" if uuid else display, provider_uuid)
 
-    async def whoami(self, username: str, password: str) -> str | None:
+    async def whoami(self, username: str, password: str) -> "Caller | None":
         async with httpx.AsyncClient(timeout=self._timeout, auth=(username, password)) as c:
             return self._who(await c.get(f"{self.base_url}/session"), fallback=username)
 
-    async def whoami_session(self, jsessionid: str) -> str | None:
+    async def whoami_session(self, jsessionid: str) -> "Caller | None":
         """The one-click path: resolve identity from the caller's EXISTING OpenMRS session
         cookie instead of soliciting credentials again. OpenMRS treats the forwarded JSESSIONID
         exactly like any in-app request, so the answer is the same identity the chart itself is
@@ -123,8 +169,57 @@ def _page(title: str, lines: list[str]) -> HTMLResponse:
     )
 
 
-def _confirm_page(task_id: str, sig: str, who: str, finding: str | None) -> HTMLResponse:
-    """The GET page: says what is about to be attested, and who it will be attributed to.
+class Anomaly(NamedTuple):
+    """What is irregular about this acknowledgement, worked out once and used by both methods.
+
+    Both fields exist because the confirmation page has to state them BEFORE the click. The live
+    #127 reproduction was a physician reading a page that named the wrong clinician and said
+    nothing about it being wrong; the live #128 reproduction was a page promising the escalation
+    clock was closed when on-call had already been paged and stayed paged.
+    """
+    on_behalf_of: str | None      # the addressee, when the acknowledger is somebody else
+    late_deadline_iso: str | None  # the missed deadline, when the window has closed
+    escalated: bool                # the escalation already fired (Task is FAILED)
+
+
+def _owner_display(task) -> str:
+    """A human name for the Task's addressee, falling back to the bare reference."""
+    owner = getattr(task, "owner", None)
+    if owner is None:
+        return "the intended recipient"
+    return getattr(owner, "display", None) or getattr(owner, "reference", None) or \
+        "the intended recipient"
+
+
+def _assess(task, caller: "Caller", now: datetime) -> Anomaly:
+    """Compare the caller and the clock against the Task. Pure, so both GET and POST agree.
+
+    The owner comparison is on the PROVIDER uuid, never the display string (see `Caller`). When
+    the caller's provider cannot be resolved we do NOT claim a mismatch: an unknown provider is
+    not evidence of the wrong person, and treating it as one would refuse or mislabel every
+    clinician whose Provider record is missing.
+    """
+    on_behalf_of = None
+    owner_ref = getattr(getattr(task, "owner", None), "reference", "") or ""
+    owner_uuid = owner_ref.split("/")[-1] if owner_ref else ""
+    if caller.provider_uuid and owner_uuid and caller.provider_uuid != owner_uuid:
+        on_behalf_of = _owner_display(task)
+
+    late_deadline_iso = None
+    period = getattr(getattr(task, "restriction", None), "period", None)
+    end = getattr(period, "end", None)
+    if end is not None:
+        deadline = end if end.tzinfo else end.replace(tzinfo=timezone.utc)
+        if now > deadline:
+            late_deadline_iso = deadline.isoformat()
+
+    return Anomaly(on_behalf_of, late_deadline_iso, task.status == TaskStatus.FAILED)
+
+
+def _confirm_page(task_id: str, sig: str, who: str, finding: str | None,
+                  anomaly: Anomaly) -> HTMLResponse:
+    """The GET page: says what is about to be attested, who it will be attributed to, and what is
+    irregular about it.
 
     The button POSTs, which is the whole point of the split -- see `acknowledge` below.
     """
@@ -140,6 +235,34 @@ def _confirm_page(task_id: str, sig: str, who: str, finding: str | None) -> HTML
     # override form, and the same blind spot: the tests POST the endpoint directly, so no test
     # ever resolved the action the browser resolves.
     action = f"?sig={quote(sig)}"
+
+    # The attribution line, and then the anomalies. Each anomaly is stated in the terms the
+    # clinician is deciding in -- who this was sent to, and whether anyone else has been paged --
+    # rather than in the ledger's terms.
+    if anomaly.on_behalf_of:
+        attribution = (
+            f"<p>This result was sent to <strong>{html.escape(anomaly.on_behalf_of)}</strong>. "
+            f"You are signed in as <strong>{html.escape(who)}</strong>, so it will be recorded as "
+            f"acknowledged on their behalf by you.</p>")
+        button = "Acknowledge on their behalf"
+    else:
+        attribution = (f"<p>This will be recorded as acknowledged by "
+                       f"<strong>{html.escape(who)}</strong>.</p>")
+        button = "Acknowledge"
+
+    if anomaly.late_deadline_iso:
+        # NOT "closes the escalation clock". The old page said that unconditionally, which is how
+        # a physician was told the loop was closed while on-call stayed paged (#128).
+        paged = (" On-call has already been paged and remains responsible for this result."
+                 if anomaly.escalated else "")
+        timing = (
+            f"<p>The acknowledgement window for this result closed at "
+            f"<strong>{html.escape(anomaly.late_deadline_iso)}</strong>. Your acknowledgement "
+            f"will be recorded as <strong>late</strong>.{paged}</p>")
+        button = "Record late acknowledgement"
+    else:
+        timing = ("<p>This closes the care team's escalation clock for this result.</p>")
+
     return HTMLResponse(
         f"<!doctype html><html><head><meta name=\"viewport\" "
         f"content=\"width=device-width, initial-scale=1\">"
@@ -147,12 +270,10 @@ def _confirm_page(task_id: str, sig: str, who: str, finding: str | None) -> HTML
         f"<body style=\"font-family: sans-serif; max-width: 30em; margin: 3em auto;\">"
         f"<h1 style=\"font-size:1.2em\">Acknowledge critical result</h1>"
         + (f"<p>Finding: {html.escape(finding)}</p>" if finding else "")
-        + f"<p>This will be recorded as acknowledged by "
-          f"<strong>{html.escape(who)}</strong>, and closes the care team's escalation clock "
-          f"for this result.</p>"
-          f"<form method=\"post\" action=\"{html.escape(action)}\">"
+        + attribution + timing
+        + f"<form method=\"post\" action=\"{html.escape(action)}\">"
           f"<button type=\"submit\" style=\"font-size:1.1em; padding:0.6em 1.2em;\">"
-          f"Acknowledge</button></form></body></html>"
+          f"{html.escape(button)}</button></form></body></html>"
     )
 
 
@@ -160,7 +281,7 @@ def create_ack_router(ledger, identity: OpenmrsIdentity) -> APIRouter:
     router = APIRouter()
 
     async def _resolve_caller(task_id: str, request: Request, sig: str):
-        """Signature, then identity. Returns `(who, early_response)`; `early_response` is a
+        """Signature, then identity. Returns `(caller, early_response)`; `early_response` is a
         challenge to return as-is. Shared by both methods so the ordering guarantee cannot
         drift between them: the signature is checked BEFORE any credential is solicited or any
         session is consulted, on GET and POST alike."""
@@ -228,30 +349,53 @@ def create_ack_router(ledger, identity: OpenmrsIdentity) -> APIRouter:
         because a prefetch carries no credentials. So the state change moved to POST and this
         GET only asks. The click on the button is still the only click the physician makes.
         """
-        who, early = await _resolve_caller(task_id, request, sig)
+        caller, early = await _resolve_caller(task_id, request, sig)
         if early is not None:
             return early
         task, finding = await _load(task_id)
         if task.status in _ACKED:
             return _already(finding)
-        return _confirm_page(task_id, sig, who, finding)
+        return _confirm_page(task_id, sig, caller.who, finding,
+                             _assess(task, caller, datetime.now(timezone.utc)))
 
     @router.post("/ack/{task_id}")
     async def acknowledge(task_id: str, request: Request, sig: str = "") -> Response:
         """The state change: submitted from the confirmation page's button."""
-        who, early = await _resolve_caller(task_id, request, sig)
+        caller, early = await _resolve_caller(task_id, request, sig)
         if early is not None:
             return early
         task, finding = await _load(task_id)
         if task.status in _ACKED:
             return _already(finding)
 
-        await ledger.complete_ack_task(task_id, acknowledged_by=who, at_iso=now_iso())
-        _log.info("ack task %s completed by %s", task_id, who)
+        anomaly = _assess(task, caller, datetime.now(timezone.utc))
+        await ledger.complete_ack_task(
+            task_id, acknowledged_by=caller.who, at_iso=now_iso(),
+            on_behalf_of=anomaly.on_behalf_of,
+            late_deadline_iso=anomaly.late_deadline_iso)
+        _log.info("ack task %s acknowledged by %s (on_behalf_of=%s late=%s escalated=%s)",
+                  task_id, caller.who, anomaly.on_behalf_of,
+                  bool(anomaly.late_deadline_iso), anomaly.escalated)
+
+        # The result page mirrors the confirmation page's claims, so a screenshot of either tells
+        # the same story. It must never assert the clock is closed when an escalation is running.
+        if anomaly.on_behalf_of:
+            attribution = (f"Recorded as acknowledged by {caller.who}, "
+                           f"on behalf of {anomaly.on_behalf_of}.")
+        else:
+            attribution = f"Recorded as acknowledged by {caller.who}."
+        if anomaly.late_deadline_iso:
+            closing = (f"Recorded as LATE: the acknowledgement window closed at "
+                       f"{anomaly.late_deadline_iso}.")
+            if anomaly.escalated:
+                closing += (" On-call was paged and remains responsible for this result; "
+                            "this acknowledgement does not stand them down.")
+        else:
+            closing = "The care team's escalation clock for this result is now closed."
         return _page("Critical result acknowledged", [
             f"Finding: {finding}" if finding else "",
-            f"Recorded as acknowledged by {who}.",
-            "The care team's escalation clock for this result is now closed.",
+            attribution,
+            closing,
         ])
 
     return router

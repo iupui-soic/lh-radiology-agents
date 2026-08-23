@@ -17,6 +17,8 @@ from fastapi.testclient import TestClient
 
 from radagent_common.ack_link import sign_ack_task
 from radagent_common.fhir_models import (
+    Period,
+    TaskRestriction,
     Communication,
     CommunicationPayload,
     Reference,
@@ -24,6 +26,7 @@ from radagent_common.fhir_models import (
     TaskStatus,
 )
 
+from ack import Caller
 from main import create_app
 
 _SECRET = "ack-test-secret"
@@ -33,6 +36,7 @@ class FakeLedger:
     def __init__(self, task: Task | None = None):
         self.task = task
         self.completed: list[tuple[str, str]] = []
+        self.calls: list[dict] = []
         self.comm_reads: list[str] = []
 
     async def get_task(self, task_id: str) -> Task:
@@ -49,10 +53,19 @@ class FakeLedger:
             payload=[CommunicationPayload(contentString="pneumothorax")])
 
     async def complete_ack_task(self, task_id: str, *, acknowledged_by: str,
-                                at_iso: str) -> Task:
+                                at_iso: str, on_behalf_of: str | None = None,
+                                late_deadline_iso: str | None = None) -> Task:
         self.completed.append((task_id, acknowledged_by))
+        self.calls.append({"task_id": task_id, "acknowledged_by": acknowledged_by,
+                           "on_behalf_of": on_behalf_of,
+                           "late_deadline_iso": late_deadline_iso})
         done = self.task.model_copy(deep=True)
-        done.status = TaskStatus.COMPLETED
+        # Mirrors the real ledger's status rule (#128): a Task the escalation already FAILED keeps
+        # that status, so a late ack cannot erase the miss. A fake that always set COMPLETED would
+        # pass a handler that reverted it, which is the #118 lesson about fakes narrower than the
+        # contract they stand in for.
+        if done.status != TaskStatus.FAILED:
+            done.status = TaskStatus.COMPLETED
         return done
 
 
@@ -60,20 +73,23 @@ class FakeIdentity:
     """Accepts exactly dr-ref/refpass (Basic) and sess-live (session cookie); records every
     attempt on each path so tests can pin WHEN and BY WHICH proof identity is consulted."""
 
-    def __init__(self):
+    def __init__(self, provider_uuid: str | None = "prov-ref"):
         self.attempts: list[str] = []
         self.session_attempts: list[str] = []
+        # The Provider uuid OpenMRS would report in session.currentProvider. Defaults to the one
+        # _open_task() addresses, so the default rig is the ordinary same-person acknowledgement.
+        self.provider_uuid = provider_uuid
 
-    async def whoami(self, username: str, password: str) -> str | None:
+    async def whoami(self, username: str, password: str) -> "Caller | None":
         self.attempts.append(username)
         if (username, password) == ("dr-ref", "refpass"):
-            return "Dr Referrer (uuid-ref)"
+            return Caller("Dr Referrer (uuid-ref)", self.provider_uuid)
         return None
 
-    async def whoami_session(self, jsessionid: str) -> str | None:
+    async def whoami_session(self, jsessionid: str) -> "Caller | None":
         self.session_attempts.append(jsessionid)
         if jsessionid == "sess-live":
-            return "Dr Referrer (uuid-ref)"
+            return Caller("Dr Referrer (uuid-ref)", self.provider_uuid)
         return None
 
 
@@ -387,3 +403,162 @@ def test_the_runbook_configures_the_ack_base_url_under_openmrs():
     assert "CRITCOM_ACK_BASE_URL=https://demo.example.org/openmrs" in runbook, (
         "the run-book's setup step must configure the ack base URL under /openmrs (#126)"
     )
+
+
+# --- #127 (WHO) and #128 (WHEN): the endpoint used to trust both -------------------------------
+#
+# Reproduced live on 2026-08-23, one after the other, in a single #79 rehearsal. First the confirm
+# page offered to record a physician uninvolved in the study, because identity had fallen back to
+# HTTP Basic and Basic takes its credential from the browser's store. Then, on the next attempt,
+# an ack landed after the window had lapsed and the escalation had fired, and the endpoint
+# overwrote the FAILED task to COMPLETED while telling the physician the escalation clock was
+# closed. On-call stayed paged.
+#
+# The rig's default identity provider is "prov-ref", so a task owned by Practitioner/prov-ref is
+# the ordinary same-person case and everything above stays untouched.
+
+def _addressed_task(task_id: str = "task-7", *, owner: str = "prov-ref",
+                    deadline: str | None = None,
+                    status: TaskStatus = TaskStatus.REQUESTED) -> Task:
+    """An ack Task with an addressee, and optionally a deadline and a terminal status."""
+    kwargs: dict = {
+        "id": task_id, "status": status,
+        "focus": Reference(reference="Communication/comm-1"),
+        "owner": Reference(reference=f"Practitioner/{owner}", display="Dr Addressee"),
+    }
+    if deadline:
+        kwargs["restriction"] = TaskRestriction(period=Period(end=deadline))
+    return Task(**kwargs)
+
+
+def _rig_for(task: Task, provider_uuid: str | None = "prov-ref"):
+    ledger = FakeLedger(task=task)
+    identity = FakeIdentity(provider_uuid=provider_uuid)
+    client = TestClient(create_app(
+        orthanc=object(), assignment=object(),
+        store=_NullStore(), ledger=ledger, identity=identity))
+    return client, ledger
+
+
+_AUTH = ("dr-ref", "refpass")
+_PAST = "2020-01-01T00:00:00+00:00"
+_FUTURE = "2999-01-01T00:00:00+00:00"
+
+
+# --- #127: the acknowledger is not the addressee ----------------------------------------------
+
+def test_a_non_addressee_is_told_before_the_click_who_it_was_sent_to(monkeypatch):
+    monkeypatch.setenv("CRITCOM_ACK_HMAC_SECRET", _SECRET)
+    client, _ = _rig_for(_addressed_task(owner="prov-someone-else"))
+    r = client.get(f"/ack/task-7?sig={_sig()}", auth=_AUTH)
+    assert r.status_code == 200
+    body = html_mod.unescape(r.text)
+    assert "Dr Addressee" in body            # who it was actually sent to
+    assert "on their behalf" in body         # and what pressing the button will mean
+    assert "Acknowledge on their behalf" in body
+
+
+def test_a_non_addressee_ack_is_recorded_naming_both_parties(monkeypatch):
+    monkeypatch.setenv("CRITCOM_ACK_HMAC_SECRET", _SECRET)
+    client, ledger = _rig_for(_addressed_task(owner="prov-someone-else"))
+    r = client.post(f"/ack/task-7?sig={_sig()}", auth=_AUTH)
+    assert r.status_code == 200
+    assert ledger.calls[0]["acknowledged_by"] == "Dr Referrer (uuid-ref)"
+    assert ledger.calls[0]["on_behalf_of"] == "Dr Addressee"
+    body = html_mod.unescape(r.text)
+    assert "on behalf of Dr Addressee" in body
+
+
+def test_the_addressee_acking_their_own_result_says_nothing_about_delegation(monkeypatch):
+    """The ordinary case must not grow scary copy: prov-ref owns it and prov-ref is acking."""
+    monkeypatch.setenv("CRITCOM_ACK_HMAC_SECRET", _SECRET)
+    client, ledger = _rig_for(_addressed_task(owner="prov-ref"))
+    body = html_mod.unescape(client.get(f"/ack/task-7?sig={_sig()}", auth=_AUTH).text)
+    assert "on their behalf" not in body
+    client.post(f"/ack/task-7?sig={_sig()}", auth=_AUTH)
+    assert ledger.calls[0]["on_behalf_of"] is None
+
+
+def test_an_unresolvable_provider_is_not_treated_as_a_mismatch(monkeypatch):
+    """#127's load-bearing degradation. `currentProvider` is null for a user with no Provider
+    record, and the lookups that would map it 403 under the fleet's least-privilege credentials.
+    Calling that a mismatch would mislabel every such clinician as acknowledging on someone
+    else's behalf; refusing on it would lock them out entirely."""
+    monkeypatch.setenv("CRITCOM_ACK_HMAC_SECRET", _SECRET)
+    client, ledger = _rig_for(_addressed_task(owner="prov-someone-else"), provider_uuid=None)
+    r = client.post(f"/ack/task-7?sig={_sig()}", auth=_AUTH)
+    assert r.status_code == 200                      # still lands
+    assert ledger.calls[0]["on_behalf_of"] is None   # and is not claimed to be delegated
+
+
+def test_a_task_with_no_owner_is_not_a_mismatch(monkeypatch):
+    monkeypatch.setenv("CRITCOM_ACK_HMAC_SECRET", _SECRET)
+    client, ledger = _rig_for(_open_task())
+    client.post(f"/ack/task-7?sig={_sig()}", auth=_AUTH)
+    assert ledger.calls[0]["on_behalf_of"] is None
+
+
+# --- #128: the window has lapsed ---------------------------------------------------------------
+
+def test_a_late_ack_is_announced_as_late_before_the_click(monkeypatch):
+    monkeypatch.setenv("CRITCOM_ACK_HMAC_SECRET", _SECRET)
+    client, _ = _rig_for(_addressed_task(deadline=_PAST))
+    body = html_mod.unescape(client.get(f"/ack/task-7?sig={_sig()}", auth=_AUTH).text)
+    assert "closed at" in body and "late" in body
+    assert "Record late acknowledgement" in body
+    # the old unconditional promise must be gone
+    assert "This closes the care team's escalation clock" not in body
+
+
+def test_a_late_ack_after_escalation_says_on_call_remains_responsible(monkeypatch):
+    """The sentence that made the live reproduction misleading rather than merely wrong."""
+    monkeypatch.setenv("CRITCOM_ACK_HMAC_SECRET", _SECRET)
+    client, _ = _rig_for(_addressed_task(deadline=_PAST, status=TaskStatus.FAILED))
+    body = html_mod.unescape(client.get(f"/ack/task-7?sig={_sig()}", auth=_AUTH).text)
+    assert "On-call has already been paged" in body
+    assert "remains responsible" in body
+
+
+def test_a_late_ack_does_not_erase_the_lapse(monkeypatch):
+    """The core of #128: an escalated Task keeps FAILED, and the deadline it missed is recorded."""
+    monkeypatch.setenv("CRITCOM_ACK_HMAC_SECRET", _SECRET)
+    task = _addressed_task(deadline=_PAST, status=TaskStatus.FAILED)
+    client, ledger = _rig_for(task)
+    r = client.post(f"/ack/task-7?sig={_sig()}", auth=_AUTH)
+    assert r.status_code == 200
+    assert ledger.calls[0]["late_deadline_iso"] is not None
+    body = html_mod.unescape(r.text)
+    assert "LATE" in body
+    assert "does not stand them down" in body
+    assert "escalation clock for this result is now closed" not in body
+
+
+def test_an_ack_inside_the_window_is_not_late(monkeypatch):
+    monkeypatch.setenv("CRITCOM_ACK_HMAC_SECRET", _SECRET)
+    client, ledger = _rig_for(_addressed_task(deadline=_FUTURE))
+    body = html_mod.unescape(client.get(f"/ack/task-7?sig={_sig()}", auth=_AUTH).text)
+    assert "late" not in body.lower()
+    assert "This closes the care team's escalation clock" in body
+    client.post(f"/ack/task-7?sig={_sig()}", auth=_AUTH)
+    assert ledger.calls[0]["late_deadline_iso"] is None
+
+
+def test_a_task_with_no_deadline_is_never_late(monkeypatch):
+    monkeypatch.setenv("CRITCOM_ACK_HMAC_SECRET", _SECRET)
+    client, ledger = _rig_for(_addressed_task())
+    client.post(f"/ack/task-7?sig={_sig()}", auth=_AUTH)
+    assert ledger.calls[0]["late_deadline_iso"] is None
+
+
+def test_both_anomalies_at_once_are_both_stated(monkeypatch):
+    """A covering physician acknowledging a result that already escalated. The page has to carry
+    both facts without either hiding the other."""
+    monkeypatch.setenv("CRITCOM_ACK_HMAC_SECRET", _SECRET)
+    client, ledger = _rig_for(
+        _addressed_task(owner="prov-someone-else", deadline=_PAST, status=TaskStatus.FAILED))
+    body = html_mod.unescape(client.get(f"/ack/task-7?sig={_sig()}", auth=_AUTH).text)
+    assert "Dr Addressee" in body and "on their behalf" in body
+    assert "late" in body and "On-call has already been paged" in body
+    client.post(f"/ack/task-7?sig={_sig()}", auth=_AUTH)
+    assert ledger.calls[0]["on_behalf_of"] == "Dr Addressee"
+    assert ledger.calls[0]["late_deadline_iso"] is not None
