@@ -151,6 +151,38 @@ ENV PUBLIC_URL=/
 ENV APP_CONFIG=config/default.js
 RUN yarn build
 
+# ---------- Stage 1b: fetch the radiology module's vendor assets (#115) ------
+#
+# The lh-radiology o3 omod ships WITHOUT its bundled vendor assets (jquery,
+# jquery-migrate, moment, tinymce, datatables, font-awesome, date-range-picker),
+# so every /openmrs/moduleResources/radiology/vendor/* URL 404s under a plain
+# `docker compose up -d` and every RIS dashboard and report form dies on
+# "jQuery is not defined". The real fix is the omod build itself (sibling
+# lh-radiology repo, filed as #115) shipping `src/main/webapp/resources/vendor/**`
+# in the WAR; this stage bakes the pinned vendor set into our own nginx layer
+# so the plain stack works too, not just the #75 hosted TLS overlay that
+# fronts OpenMRS with Caddy.
+#
+# Reuses docker/caddy/fetch-radiology-vendor.sh verbatim so the plain-stack
+# workaround and the overlay workaround pin the same versions. One place to
+# bump when the omod finally ships them again -- and one place to delete when
+# the sibling fix lands.
+
+FROM alpine:3.20 AS radiology-vendor-fetch
+RUN apk add --no-cache bash curl ca-certificates
+WORKDIR /fetch
+COPY docker/caddy/fetch-radiology-vendor.sh /fetch/fetch-radiology-vendor.sh
+# Strip CRLF before executing: a Windows-checkout of the repo (git's autocrlf) ships this
+# script with CRLF line endings, and bash on Alpine treats the trailing \r as part of the
+# option name, so `set -euo pipefail\r` fails with "invalid option name". `tr` normalises
+# in place so the script runs identically whether the repo was checked out on Windows or
+# Linux/macOS. Idempotent for LF-only files.
+RUN sed -i 's/\r$//' /fetch/fetch-radiology-vendor.sh \
+    && chmod +x /fetch/fetch-radiology-vendor.sh \
+    && bash /fetch/fetch-radiology-vendor.sh
+# The fetch script writes to `radiology-vendor/` in its own working directory,
+# so the assets end up at /fetch/radiology-vendor/{jquery,moment,tinymce,...}.
+
 # ---------- Stage 2: serve the built dist ------------------------------------
 
 FROM nginx:1.27-alpine
@@ -162,5 +194,12 @@ FROM nginx:1.27-alpine
 COPY --from=builder /work/platform/app/dist /usr/share/nginx/html
 # app-config.js is bind-mounted at runtime by docker-compose. Leave the built
 # copy as a fallback so a docker run without the bind mount is still usable.
+
+# #115: the radiology module's vendor assets, served locally by the /openmrs/
+# moduleResources/radiology/vendor/ location block in default.conf. See the
+# radiology-vendor-fetch stage above for the rationale; the location block
+# rewrites the URL path so a mismatched destination directory (e.g. under
+# /usr/share/nginx/html/vendor) would 404 every asset silently.
+COPY --from=radiology-vendor-fetch /fetch/radiology-vendor /usr/share/nginx/html/radiology-vendor
 
 EXPOSE 80
