@@ -77,8 +77,14 @@ origin the #75 Caddy overlay serves. Nothing else is reachable off-box.
    workaround. The plain stack now serves them from an nginx `location` in the OHIF image
    (`docker/ohif/default.conf` + the `radiology-vendor-fetch` stage in
    `integrations/ohif-extension/Dockerfile`, using the same `docker/caddy/fetch-radiology-vendor.sh`
-   the #75 hosted overlay uses so both pin identical versions). No host-side fetch is required
-   for the plain stack; the #75 overlay's Caddy handle still serves them for the hosted showcase.
+   the #75 hosted overlay uses so both pin identical versions). No host-side fetch is required.
+   **Reach the RIS through the OHIF origin for this to work**: on the plain stack that is
+   `http://localhost:3000/openmrs/...`, because the nginx `location` serving the assets lives in
+   the OHIF image. `docker-compose.yml` also publishes OpenMRS directly on `8080:8080`, and that
+   port is served by OpenMRS itself, so vendor URLs still 404 there and the report form is still
+   dead. If a form looks broken on a local stack, check which port you are on before anything
+   else. The #75 overlay's Caddy handle still serves them for the hosted showcase, where
+   everything is already same-origin behind Caddy.
    The real fix is the o3 omod build shipping `src/main/webapp/resources/vendor/**`, still open on #115.
 5b. `ris-sign-bridge` is up (`docker compose ps ris-sign-bridge`): the module's sign emit is
    broken (ServiceNotFoundException, swallowed), so without the bridge a signed report never
