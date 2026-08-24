@@ -35,7 +35,7 @@ from radagent_common.tracing import now_iso
 
 from llm_draft import draft_impression
 
-AGENT_VERSION = "0.2.0"
+AGENT_VERSION = "0.3.0"
 _log = logging.getLogger(__name__)
 
 # Read-only fhir2 client for report-content lookup (#16). Lazily built so importing this module
