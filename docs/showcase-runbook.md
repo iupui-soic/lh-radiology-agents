@@ -72,9 +72,14 @@ origin the #75 Caddy overlay serves. Nothing else is reachable off-box.
    (`role 'Radiology: Referring physician': N granted, ...`).
 5. OpenMRS seed captured once (`scripts/dump_openmrs_seed.sh`) so recovery never costs the
    16-minute boot.
-5a. Radiology-module vendor assets fetched once per host (`docker/caddy/fetch-radiology-vendor.sh`,
-   network required): the omod ships without them and every RIS page dies on "jQuery is not
-   defined" until Caddy can serve them (#75 overlay; real fix is the o3 omod build).
+5a. Radiology-module vendor assets are baked into the OHIF image at build time (#115): the
+   omod ships without them and every RIS page dies on "jQuery is not defined" without a
+   workaround. The plain stack now serves them from an nginx `location` in the OHIF image
+   (`docker/ohif/default.conf` + the `radiology-vendor-fetch` stage in
+   `integrations/ohif-extension/Dockerfile`, using the same `docker/caddy/fetch-radiology-vendor.sh`
+   the #75 hosted overlay uses so both pin identical versions). No host-side fetch is required
+   for the plain stack; the #75 overlay's Caddy handle still serves them for the hosted showcase.
+   The real fix is the o3 omod build shipping `src/main/webapp/resources/vendor/**`, still open on #115.
 5b. `ris-sign-bridge` is up (`docker compose ps ris-sign-bridge`): the module's sign emit is
    broken (ServiceNotFoundException, swallowed), so without the bridge a signed report never
    reaches fhir2/the poller and every read parks at the gate (workaround for #70; real fix o3).
