@@ -8,12 +8,12 @@ in a deliberate order:
    never even gets a password prompt, so credentials are never solicited by an illegitimate link
    (`radagent_common.ack_link` holds the signing rationale).
 2. **Identity is the human, not the link.** Possession of a URL is not "Dr X acknowledged": the
-   caller's identity is resolved through `/ws/rest/v1/session` — the same identity OpenMRS
-   itself would report — by whichever proof the request already carries, in order:
+   caller's identity is resolved through `/ws/rest/v1/session`, the same identity OpenMRS
+   itself would report, by whichever proof the request already carries, in order:
    a. the caller's EXISTING OpenMRS session (`JSESSIONID` cookie): the physician is reading the
       chart in an authenticated browser, so the ack is ONE CLICK with no second login. The
-      browser only sends that cookie when the ack URL rides under the cookie's `/openmrs` path
-      — i.e. a deployment fronting worklist-api at `/openmrs/ack/...` on the same host (a
+      browser only sends that cookie when the ack URL rides under the cookie's `/openmrs` path,
+      i.e. a deployment fronting worklist-api at `/openmrs/ack/...` on the same host (a
       reverse-proxy route; the dev compose ports don't do this) and pointing
       CRITCOM_ACK_BASE_URL there. Anywhere else the cookie is absent and nothing changes.
    b. HTTP Basic (the fallback: a link opened outside the EHR, e.g. from a page), passed
@@ -29,7 +29,7 @@ in a deliberate order:
    one click; it is just a click on a button that says what it will attest.
 4. **The ledger Task closes with WHO on it** (`complete_ack_task`: status COMPLETED + a note
    naming the acknowledger). `comms.checkAck` then reports COMPLETED and the orchestrator's
-   escalation never fires — the run-book's "acknowledged in time" arc.
+   escalation never fires, which is the run-book's "acknowledged in time" arc.
 5. **WHO and WHEN are checked, and stated before the click** (#127, #128). The endpoint used to
    trust both. It recorded whoever authenticated, without comparing them to the Task's addressee,
    and it accepted an ack after the window had lapsed, overwriting the FAILED status the
@@ -51,8 +51,8 @@ in a deliberate order:
      misleading rather than merely wrong.
 
 Still ONE tap on a paged phone: the link opens the confirmation page, and the button on it is
-the tap. What the split buys is that everything which is not a tap — a prefetch, a tab restore,
-a link-previewing mail client, a security scanner — now lands on a page instead of writing an
+the tap. What the split buys is that everything which is not a tap (a prefetch, a tab restore,
+a link-previewing mail client, a security scanner) now lands on a page instead of writing an
 attestation. Re-tapping is idempotent either way: an already-acknowledged Task renders the
 already-acknowledged page and is never re-written, so there is no duplicated loop.
 
