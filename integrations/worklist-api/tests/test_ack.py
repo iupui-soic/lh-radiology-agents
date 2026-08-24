@@ -73,12 +73,23 @@ class FakeIdentity:
     """Accepts exactly dr-ref/refpass (Basic) and sess-live (session cookie); records every
     attempt on each path so tests can pin WHEN and BY WHICH proof identity is consulted."""
 
-    def __init__(self, provider_uuid: str | None = "prov-ref"):
+    def __init__(self, provider_uuid: str | None = "prov-ref",
+                 provider_names: dict | None = None):
         self.attempts: list[str] = []
         self.session_attempts: list[str] = []
         # The Provider uuid OpenMRS would report in session.currentProvider. Defaults to the one
         # _open_task() addresses, so the default rig is the ordinary same-person acknowledgement.
         self.provider_uuid = provider_uuid
+        # #130: what GET /provider/<uuid> would answer. Empty by default, so a test that does not
+        # opt in sees the un-resolvable case rather than a name conjured by the fake.
+        self.provider_names = provider_names or {}
+        self.name_lookups: list[tuple] = []
+
+    async def provider_name(self, provider_uuid: str, proof) -> str | None:
+        # Records the PROOF as well as the uuid: the lookup being made with the caller's own
+        # credential rather than a service account is a property worth pinning, not an accident.
+        self.name_lookups.append((provider_uuid, proof))
+        return self.provider_names.get(provider_uuid)
 
     async def whoami(self, username: str, password: str) -> "Caller | None":
         self.attempts.append(username)
@@ -419,25 +430,36 @@ def test_the_runbook_configures_the_ack_base_url_under_openmrs():
 
 def _addressed_task(task_id: str = "task-7", *, owner: str = "prov-ref",
                     deadline: str | None = None,
-                    status: TaskStatus = TaskStatus.REQUESTED) -> Task:
-    """An ack Task with an addressee, and optionally a deadline and a terminal status."""
+                    status: TaskStatus = TaskStatus.REQUESTED,
+                    owner_display: str | None = "Dr Addressee") -> Task:
+    """An ack Task with an addressee, and optionally a deadline and a terminal status.
+
+    `owner_display=None` is the shape the LIVE ledger actually writes (#130): the comms agent
+    carries the requester reference verbatim and never dereferences it, so there is no display on
+    the resource. Both shapes are exercised on purpose. A fixture that only ever carried a display
+    is what let a page ship that offered a covering physician a bare uuid to acknowledge on behalf
+    of, which is the #118 lesson landing a second time on this surface.
+    """
+    owner_ref = Reference(reference=f"Practitioner/{owner}", display=owner_display) \
+        if owner_display else Reference(reference=f"Practitioner/{owner}")
     kwargs: dict = {
         "id": task_id, "status": status,
         "focus": Reference(reference="Communication/comm-1"),
-        "owner": Reference(reference=f"Practitioner/{owner}", display="Dr Addressee"),
+        "owner": owner_ref,
     }
     if deadline:
         kwargs["restriction"] = TaskRestriction(period=Period(end=deadline))
     return Task(**kwargs)
 
 
-def _rig_for(task: Task, provider_uuid: str | None = "prov-ref"):
+def _rig_for(task: Task, provider_uuid: str | None = "prov-ref",
+             provider_names: dict | None = None):
     ledger = FakeLedger(task=task)
-    identity = FakeIdentity(provider_uuid=provider_uuid)
+    identity = FakeIdentity(provider_uuid=provider_uuid, provider_names=provider_names)
     client = TestClient(create_app(
         orthanc=object(), assignment=object(),
         store=_NullStore(), ledger=ledger, identity=identity))
-    return client, ledger
+    return client, ledger, identity
 
 
 _AUTH = ("dr-ref", "refpass")
@@ -449,7 +471,7 @@ _FUTURE = "2999-01-01T00:00:00+00:00"
 
 def test_a_non_addressee_is_told_before_the_click_who_it_was_sent_to(monkeypatch):
     monkeypatch.setenv("CRITCOM_ACK_HMAC_SECRET", _SECRET)
-    client, _ = _rig_for(_addressed_task(owner="prov-someone-else"))
+    client, _, _ident = _rig_for(_addressed_task(owner="prov-someone-else"))
     r = client.get(f"/ack/task-7?sig={_sig()}", auth=_AUTH)
     assert r.status_code == 200
     body = html_mod.unescape(r.text)
@@ -460,7 +482,7 @@ def test_a_non_addressee_is_told_before_the_click_who_it_was_sent_to(monkeypatch
 
 def test_a_non_addressee_ack_is_recorded_naming_both_parties(monkeypatch):
     monkeypatch.setenv("CRITCOM_ACK_HMAC_SECRET", _SECRET)
-    client, ledger = _rig_for(_addressed_task(owner="prov-someone-else"))
+    client, ledger, _ident = _rig_for(_addressed_task(owner="prov-someone-else"))
     r = client.post(f"/ack/task-7?sig={_sig()}", auth=_AUTH)
     assert r.status_code == 200
     assert ledger.calls[0]["acknowledged_by"] == "Dr Referrer (uuid-ref)"
@@ -472,7 +494,7 @@ def test_a_non_addressee_ack_is_recorded_naming_both_parties(monkeypatch):
 def test_the_addressee_acking_their_own_result_says_nothing_about_delegation(monkeypatch):
     """The ordinary case must not grow scary copy: prov-ref owns it and prov-ref is acking."""
     monkeypatch.setenv("CRITCOM_ACK_HMAC_SECRET", _SECRET)
-    client, ledger = _rig_for(_addressed_task(owner="prov-ref"))
+    client, ledger, _ident = _rig_for(_addressed_task(owner="prov-ref"))
     body = html_mod.unescape(client.get(f"/ack/task-7?sig={_sig()}", auth=_AUTH).text)
     assert "on their behalf" not in body
     client.post(f"/ack/task-7?sig={_sig()}", auth=_AUTH)
@@ -485,7 +507,7 @@ def test_an_unresolvable_provider_is_not_treated_as_a_mismatch(monkeypatch):
     Calling that a mismatch would mislabel every such clinician as acknowledging on someone
     else's behalf; refusing on it would lock them out entirely."""
     monkeypatch.setenv("CRITCOM_ACK_HMAC_SECRET", _SECRET)
-    client, ledger = _rig_for(_addressed_task(owner="prov-someone-else"), provider_uuid=None)
+    client, ledger, _ident = _rig_for(_addressed_task(owner="prov-someone-else"), provider_uuid=None)
     r = client.post(f"/ack/task-7?sig={_sig()}", auth=_AUTH)
     assert r.status_code == 200                      # still lands
     assert ledger.calls[0]["on_behalf_of"] is None   # and is not claimed to be delegated
@@ -493,7 +515,7 @@ def test_an_unresolvable_provider_is_not_treated_as_a_mismatch(monkeypatch):
 
 def test_a_task_with_no_owner_is_not_a_mismatch(monkeypatch):
     monkeypatch.setenv("CRITCOM_ACK_HMAC_SECRET", _SECRET)
-    client, ledger = _rig_for(_open_task())
+    client, ledger, _ident = _rig_for(_open_task())
     client.post(f"/ack/task-7?sig={_sig()}", auth=_AUTH)
     assert ledger.calls[0]["on_behalf_of"] is None
 
@@ -502,7 +524,7 @@ def test_a_task_with_no_owner_is_not_a_mismatch(monkeypatch):
 
 def test_a_late_ack_is_announced_as_late_before_the_click(monkeypatch):
     monkeypatch.setenv("CRITCOM_ACK_HMAC_SECRET", _SECRET)
-    client, _ = _rig_for(_addressed_task(deadline=_PAST))
+    client, _, _ident = _rig_for(_addressed_task(deadline=_PAST))
     body = html_mod.unescape(client.get(f"/ack/task-7?sig={_sig()}", auth=_AUTH).text)
     assert "closed at" in body and "late" in body
     assert "Record late acknowledgement" in body
@@ -513,7 +535,7 @@ def test_a_late_ack_is_announced_as_late_before_the_click(monkeypatch):
 def test_a_late_ack_after_escalation_says_on_call_remains_responsible(monkeypatch):
     """The sentence that made the live reproduction misleading rather than merely wrong."""
     monkeypatch.setenv("CRITCOM_ACK_HMAC_SECRET", _SECRET)
-    client, _ = _rig_for(_addressed_task(deadline=_PAST, status=TaskStatus.FAILED))
+    client, _, _ident = _rig_for(_addressed_task(deadline=_PAST, status=TaskStatus.FAILED))
     body = html_mod.unescape(client.get(f"/ack/task-7?sig={_sig()}", auth=_AUTH).text)
     assert "On-call has already been paged" in body
     assert "remains responsible" in body
@@ -523,7 +545,7 @@ def test_a_late_ack_does_not_erase_the_lapse(monkeypatch):
     """The core of #128: an escalated Task keeps FAILED, and the deadline it missed is recorded."""
     monkeypatch.setenv("CRITCOM_ACK_HMAC_SECRET", _SECRET)
     task = _addressed_task(deadline=_PAST, status=TaskStatus.FAILED)
-    client, ledger = _rig_for(task)
+    client, ledger, _ident = _rig_for(task)
     r = client.post(f"/ack/task-7?sig={_sig()}", auth=_AUTH)
     assert r.status_code == 200
     assert ledger.calls[0]["late_deadline_iso"] is not None
@@ -535,7 +557,7 @@ def test_a_late_ack_does_not_erase_the_lapse(monkeypatch):
 
 def test_an_ack_inside_the_window_is_not_late(monkeypatch):
     monkeypatch.setenv("CRITCOM_ACK_HMAC_SECRET", _SECRET)
-    client, ledger = _rig_for(_addressed_task(deadline=_FUTURE))
+    client, ledger, _ident = _rig_for(_addressed_task(deadline=_FUTURE))
     body = html_mod.unescape(client.get(f"/ack/task-7?sig={_sig()}", auth=_AUTH).text)
     assert "late" not in body.lower()
     assert "This closes the care team's escalation clock" in body
@@ -545,7 +567,7 @@ def test_an_ack_inside_the_window_is_not_late(monkeypatch):
 
 def test_a_task_with_no_deadline_is_never_late(monkeypatch):
     monkeypatch.setenv("CRITCOM_ACK_HMAC_SECRET", _SECRET)
-    client, ledger = _rig_for(_addressed_task())
+    client, ledger, _ident = _rig_for(_addressed_task())
     client.post(f"/ack/task-7?sig={_sig()}", auth=_AUTH)
     assert ledger.calls[0]["late_deadline_iso"] is None
 
@@ -554,7 +576,7 @@ def test_both_anomalies_at_once_are_both_stated(monkeypatch):
     """A covering physician acknowledging a result that already escalated. The page has to carry
     both facts without either hiding the other."""
     monkeypatch.setenv("CRITCOM_ACK_HMAC_SECRET", _SECRET)
-    client, ledger = _rig_for(
+    client, ledger, _ident = _rig_for(
         _addressed_task(owner="prov-someone-else", deadline=_PAST, status=TaskStatus.FAILED))
     body = html_mod.unescape(client.get(f"/ack/task-7?sig={_sig()}", auth=_AUTH).text)
     assert "Dr Addressee" in body and "on their behalf" in body
@@ -562,3 +584,86 @@ def test_both_anomalies_at_once_are_both_stated(monkeypatch):
     client.post(f"/ack/task-7?sig={_sig()}", auth=_AUTH)
     assert ledger.calls[0]["on_behalf_of"] == "Dr Addressee"
     assert ledger.calls[0]["late_deadline_iso"] is not None
+
+
+# --- #130: the addressee has to be readable, not a uuid ----------------------------------------
+#
+# Found by running !180 on the demo host, 2026-08-24. The delegation copy was correct and the
+# ledger note was correct, but both named the addressee `Practitioner/718bc49a-...` because the
+# LIVE Task.owner carries no display and the fixture above always did. A covering physician was
+# asked to acknowledge on behalf of a uuid, which defeats the safeguard #127's decision rests on.
+
+_LIVE_SHAPE = dict(owner="prov-someone-else", owner_display=None)   # what the ledger really writes
+_NAMES = {"prov-someone-else": "dr.reyes - Marisol Reyes"}
+
+
+def test_a_display_less_owner_is_named_from_the_provider_record(monkeypatch):
+    """The #130 reproduction, inverted. The owner reference has no display, exactly as the live
+    ledger writes it, and the page must still name a human."""
+    monkeypatch.setenv("CRITCOM_ACK_HMAC_SECRET", _SECRET)
+    client, _, ident = _rig_for(_addressed_task(**_LIVE_SHAPE), provider_names=_NAMES)
+    body = html_mod.unescape(client.get(f"/ack/task-7?sig={_sig()}", auth=_AUTH).text)
+    assert "dr.reyes - Marisol Reyes" in body
+    assert "Practitioner/prov-someone-else" not in body    # the raw reference is gone
+    assert ident.name_lookups[0][0] == "prov-someone-else"  # looked up by the OWNER's uuid
+
+
+def test_the_ledger_note_names_the_addressee_the_same_way_the_page_does(monkeypatch):
+    """One resolution feeds both, so the audit record and the confirmation page cannot tell
+    different stories about the same acknowledgement."""
+    monkeypatch.setenv("CRITCOM_ACK_HMAC_SECRET", _SECRET)
+    client, ledger, _ = _rig_for(_addressed_task(**_LIVE_SHAPE), provider_names=_NAMES)
+    page = html_mod.unescape(client.get(f"/ack/task-7?sig={_sig()}", auth=_AUTH).text)
+    result = html_mod.unescape(client.post(f"/ack/task-7?sig={_sig()}", auth=_AUTH).text)
+    assert ledger.calls[0]["on_behalf_of"] == "dr.reyes - Marisol Reyes"
+    for surface in (page, result):
+        assert "dr.reyes - Marisol Reyes" in surface
+        assert "Practitioner/prov-someone-else" not in surface
+
+
+def test_an_unresolvable_name_falls_back_to_the_reference_and_still_acks(monkeypatch):
+    """Best-effort by construction: OpenMRS being slow, down or stingy with privileges costs a
+    name, never the acknowledgement. This is the degradation #127 already insisted on, one field
+    further in."""
+    monkeypatch.setenv("CRITCOM_ACK_HMAC_SECRET", _SECRET)
+    client, ledger, _ = _rig_for(_addressed_task(**_LIVE_SHAPE), provider_names={})  # lookup misses
+    r = client.post(f"/ack/task-7?sig={_sig()}", auth=_AUTH)
+    assert r.status_code == 200                                          # the ack still lands
+    assert ledger.calls[0]["on_behalf_of"] == "Practitioner/prov-someone-else"
+    assert "on behalf of" in html_mod.unescape(r.text)                   # still declared delegated
+
+
+def test_an_owner_that_already_has_a_display_is_not_looked_up(monkeypatch):
+    """The resource answering the question already means no request is earned."""
+    monkeypatch.setenv("CRITCOM_ACK_HMAC_SECRET", _SECRET)
+    client, ledger, ident = _rig_for(_addressed_task(owner="prov-someone-else"),
+                                     provider_names=_NAMES)
+    body = html_mod.unescape(client.get(f"/ack/task-7?sig={_sig()}", auth=_AUTH).text)
+    assert "Dr Addressee" in body
+    assert ident.name_lookups == []
+
+
+def test_the_ordinary_same_person_ack_costs_no_lookup(monkeypatch):
+    """The common path must not pay for the rare one: no mismatch, no request."""
+    monkeypatch.setenv("CRITCOM_ACK_HMAC_SECRET", _SECRET)
+    client, _, ident = _rig_for(_addressed_task(owner="prov-ref", owner_display=None),
+                                provider_names=_NAMES)
+    client.get(f"/ack/task-7?sig={_sig()}", auth=_AUTH)
+    client.post(f"/ack/task-7?sig={_sig()}", auth=_AUTH)
+    assert ident.name_lookups == []
+
+
+def test_the_name_is_read_with_the_callers_own_credential_not_a_service_account(monkeypatch):
+    """worklist-api holds no OpenMRS credentials (#75 least privilege), and reading as the caller
+    means this page can never surface what that clinician could not already read in the RIS."""
+    monkeypatch.setenv("CRITCOM_ACK_HMAC_SECRET", _SECRET)
+    client, _, ident = _rig_for(_addressed_task(**_LIVE_SHAPE), provider_names=_NAMES)
+
+    client.get(f"/ack/task-7?sig={_sig()}", auth=_AUTH)
+    _, basic_proof = ident.name_lookups[-1]
+    assert basic_proof.auth == _AUTH and basic_proof.cookies is None
+
+    client.cookies.set("JSESSIONID", "sess-live")
+    client.get(f"/ack/task-7?sig={_sig()}")
+    _, cookie_proof = ident.name_lookups[-1]
+    assert cookie_proof.cookies == {"JSESSIONID": "sess-live"} and cookie_proof.auth is None
