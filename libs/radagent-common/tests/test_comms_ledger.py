@@ -313,3 +313,78 @@ def test_complete_ack_task_records_who_and_preserves_the_loop():
     assert body["note"][0]["text"] == "paged twice"                     # earlier notes kept
     assert body["note"][1] == {"text": "acknowledged by Dr B (uuid-b)",
                                "time": "2026-07-19T18:00:00+00:00"}
+
+
+def _ack_rig(status: TaskStatus, note=None):
+    """A CommsLedgerClient wired to fakes, returning (client, put_capture)."""
+    client = CommsLedgerClient(base_url="http://ledger/fhir")
+    existing = Task(
+        id="task-1", status=status,
+        focus=Reference(reference="Communication/comm-1"),
+        owner=Reference(reference="Practitioner/dr-a"),
+        note=note or [],
+    ).model_dump(mode="json", exclude_none=True, by_alias=True)
+    put: dict = {}
+
+    async def fake_get(path, params=None):
+        return existing
+
+    async def fake_put(path, resource):
+        put.update(path=path, body=resource)
+        return resource
+
+    client._get = fake_get      # type: ignore[assignment]
+    client._put = fake_put      # type: ignore[assignment]
+    return client, put
+
+
+def test_a_late_ack_does_not_overwrite_the_failed_status(monkeypatch):
+    """#128, the core of it. `escalate_to_on_call` sets FAILED when the window lapses, and that
+    status IS the record that nobody acknowledged in time and on-call was paged. A late ack must
+    add to that record, never replace it.
+
+    Reproduced live 2026-08-23: the endpoint flipped a FAILED task to COMPLETED, so the ledger
+    read like a clean in-time acknowledgement of a result that was actually missed, while the
+    on-call task stayed open and nobody stood them down.
+    """
+    client, put = _ack_rig(TaskStatus.FAILED)
+    updated = asyncio.run(client.complete_ack_task(
+        "task-1", acknowledged_by="Dr A (uuid-a)", at_iso="2026-08-23T19:14:00+00:00",
+        late_deadline_iso="2026-08-23T19:03:06+00:00"))
+
+    assert updated.status is TaskStatus.FAILED          # the lapse survives
+    assert put["body"]["status"] == "failed"
+    assert put["body"]["note"][0]["text"] == (
+        "late acknowledgement by Dr A (uuid-a); deadline was 2026-08-23T19:03:06+00:00")
+
+
+def test_a_late_ack_on_a_task_that_never_escalated_still_completes():
+    """No second human was engaged, so there is no lapse to preserve -- but the note still tells
+    the truth about the timing."""
+    client, put = _ack_rig(TaskStatus.REQUESTED)
+    updated = asyncio.run(client.complete_ack_task(
+        "task-1", acknowledged_by="Dr A (uuid-a)", at_iso="2026-08-23T19:14:00+00:00",
+        late_deadline_iso="2026-08-23T19:03:06+00:00"))
+    assert updated.status is TaskStatus.COMPLETED
+    assert "late acknowledgement" in put["body"]["note"][0]["text"]
+
+
+def test_an_on_behalf_of_ack_names_both_parties():
+    """#127: a covering physician acknowledging for the addressee is normal, and the record has to
+    show BOTH rather than silently substituting one clinician for the other."""
+    client, put = _ack_rig(TaskStatus.REQUESTED)
+    asyncio.run(client.complete_ack_task(
+        "task-1", acknowledged_by="Dr B (uuid-b)", at_iso="2026-08-23T19:14:00+00:00",
+        on_behalf_of="Dr A"))
+    assert put["body"]["note"][0]["text"] == "acknowledged by Dr B (uuid-b) (on behalf of Dr A)"
+    # owner is untouched: the addressee is still who it was SENT to
+    assert put["body"]["owner"] == {"reference": "Practitioner/dr-a"}
+
+
+def test_an_ordinary_ack_note_is_unchanged():
+    """The #79 wording must not drift for the normal case; it is what the run-book screenshots."""
+    client, put = _ack_rig(TaskStatus.REQUESTED)
+    asyncio.run(client.complete_ack_task(
+        "task-1", acknowledged_by="Dr A (uuid-a)", at_iso="2026-08-23T19:14:00+00:00"))
+    assert put["body"]["status"] == "completed"
+    assert put["body"]["note"][0]["text"] == "acknowledged by Dr A (uuid-a)"

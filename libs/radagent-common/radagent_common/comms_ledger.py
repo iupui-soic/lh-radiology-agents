@@ -143,16 +143,41 @@ class CommsLedgerClient:
         return Task.model_validate(await self._put(f"Task/{resource_id}", _dump(task)))
 
     async def complete_ack_task(self, resource_id: str, *, acknowledged_by: str,
-                                at_iso: str) -> Task:
-        """Close the loop AND say who closed it (#79's explicit ack): status -> COMPLETED, plus a
-        FHIR Annotation on `Task.note` naming the authenticated acknowledger. The note is the
-        audit fact the plain status flip cannot carry — `Task.owner` stays the INTENDED recipient,
-        so "sent to Dr A, acknowledged by Dr B" remains readable from one resource. Same
-        read-modify-write rationale as update_task_status."""
+                                at_iso: str, on_behalf_of: str | None = None,
+                                late_deadline_iso: str | None = None) -> Task:
+        """Close the loop AND say who closed it (#79's explicit ack): a FHIR Annotation on
+        `Task.note` naming the authenticated acknowledger, and status -> COMPLETED unless the loop
+        already terminated. The note is the audit fact the plain status flip cannot carry —
+        `Task.owner` stays the INTENDED recipient, so "sent to Dr A, acknowledged by Dr B" remains
+        readable from one resource. Same read-modify-write rationale as update_task_status.
+
+        `on_behalf_of` (#127): set when the acknowledger is NOT the Task's addressee. Both parties
+        go in the note, because a covering physician acknowledging for the addressee is normal and
+        the record has to show it happened rather than silently substituting one clinician for the
+        other. Pass the addressee's reference/display; None means the acknowledger IS the owner.
+
+        `late_deadline_iso` (#128): set when the ack arrives after `restriction.period.end`. The
+        note then records the lateness AND the deadline it missed.
+
+        STATUS RULE, and the reason this method no longer just assigns COMPLETED: a Task the
+        escalation already marked FAILED keeps that status. FAILED is the record that nobody
+        acknowledged in time and that on-call was paged; overwriting it to COMPLETED erased the
+        miss and left the ledger reading like a clean in-time acknowledgement of a result that was
+        actually missed (#128, reproduced live 2026-08-23). A late ack on a Task that has NOT yet
+        escalated still completes: no second human was engaged, so there is no lapse to preserve,
+        and the note carries the timing truth either way.
+        """
         task = await self.get_task(resource_id)
-        task.status = TaskStatus.COMPLETED
-        task.note = list(task.note) + [
-            {"text": f"acknowledged by {acknowledged_by}", "time": at_iso}]
+        if task.status != TaskStatus.FAILED:
+            task.status = TaskStatus.COMPLETED
+        if late_deadline_iso:
+            text = (f"late acknowledgement by {acknowledged_by}; deadline was "
+                    f"{late_deadline_iso}")
+        else:
+            text = f"acknowledged by {acknowledged_by}"
+        if on_behalf_of:
+            text = f"{text} (on behalf of {on_behalf_of})"
+        task.note = list(task.note) + [{"text": text, "time": at_iso}]
         return Task.model_validate(await self._put(f"Task/{resource_id}", _dump(task)))
 
     async def search_tasks_for_communication(self, communication_id: str) -> list[Task]:
