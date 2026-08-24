@@ -39,7 +39,10 @@ in a deliberate order:
      normal and refusing them would push people to acknowledge from a colleague's logged-in
      browser. Recorded as on-behalf-of, naming BOTH parties, and the confirmation page says so
      before the button is pressed. Compared on the PROVIDER uuid (`session.currentProvider`), and
-     an unresolvable provider is never treated as a mismatch — see `Caller`.
+     an unresolvable provider is never treated as a mismatch, see `Caller`. The addressee is
+     NAMED by a best-effort `/provider/<uuid>` read made as the caller, because the live
+     `Task.owner` carries no display and a uuid is not something a covering physician can check
+     (#130). See `_resolve_addressee_name`.
    * **Late**: permitted, because a physician who finally reads the notification has still
      received it and that is worth recording. But an escalation that already fired stands: the
      Task keeps its FAILED status, the note records the miss and the deadline, and the on-call
@@ -91,14 +94,38 @@ class Caller(NamedTuple):
 
     `provider_uuid` is None when the session has no `currentProvider`, which is a real state on
     this deployment rather than an error: a user with no Provider record (admin, service accounts)
-    returns null there, and the direct lookups that would map it -- `/provider?user=` and
-    `/user/<uuid>` -- both 403 under the fleet's least-privilege credentials. So None means
-    "cannot determine", NEVER "not authorised": the ack still lands and the note says the provider
-    was unknown. Refusing on None would lock out exactly the clinicians whose Provider records are
-    missing.
+    returns null there, and the lookups that would map a USER to a PROVIDER -- `/provider?user=`
+    and `/user/<uuid>` -- both 403 under the fleet's least-privilege credentials, because both
+    need "Get Users". So None means "cannot determine", NEVER "not authorised": the ack still
+    lands and the note says the provider was unknown. Refusing on None would lock out exactly the
+    clinicians whose Provider records are missing.
+
+    That 403 is about the USER->PROVIDER direction only. Reading a provider BY ITS OWN UUID
+    (`/provider/<uuid>`) is a Provider read, needs no user privilege, and does work -- which is
+    what lets `_resolve_addressee_name` put a name on the page (#130). The two were conflated in
+    the first version of this comment, and the result was a page that offered a covering physician
+    a bare uuid to acknowledge on behalf of.
     """
     who: str
     provider_uuid: str | None
+
+
+class Proof(NamedTuple):
+    """How this request proved who the caller is, kept for the lifetime of THIS request only.
+
+    It exists so a follow-up read can be made AS THE CALLER rather than as a service account.
+    That is deliberate on three counts. worklist-api holds no OpenMRS credentials at all, and
+    giving it some to render a name would widen its blast radius against the #75 least-privilege
+    hosting. Reading as the caller means this page can never surface anything the clinician could
+    not already read in the RIS. And it keeps the module docstring's promise that identity here is
+    the human, not the link.
+
+    The Basic password is already in this request's headers, so holding it for one more call
+    within the same request adds no exposure. It is never logged, never stored, and never leaves
+    the request.
+    """
+    cookies: dict[str, str] | None = None
+    auth: tuple[str, str] | None = None
 
 
 class OpenmrsIdentity:
@@ -149,6 +176,31 @@ class OpenmrsIdentity:
                                      cookies={"JSESSIONID": jsessionid}) as c:
             return self._who(await c.get(f"{self.base_url}/session"))
 
+    async def provider_name(self, provider_uuid: str, proof: "Proof") -> str | None:
+        """The Provider's human name, read AS THE CALLER (#130). None on ANY failure.
+
+        Best-effort by construction: this only ever decorates a page and a note that are already
+        correct without it, so a slow or unhappy OpenMRS must cost a name, never the ack. Every
+        exception is swallowed for that reason, and the caller falls back to the raw reference.
+
+        `v=custom:(display)` keeps the response small; `display` comes back as
+        "dr.reyes - Marisol Reyes", which is what a clinician actually recognises.
+        """
+        if not provider_uuid:
+            return None
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout, cookies=proof.cookies or {},
+                                         auth=proof.auth) as c:
+                r = await c.get(f"{self.base_url}/provider/{provider_uuid}",
+                                params={"v": "custom:(display)"})
+            if r.status_code != 200:
+                return None
+            return (r.json().get("display") or "").strip() or None
+        except Exception:  # noqa: BLE001 -- a name is garnish; the ack must not depend on it
+            _log.debug("could not resolve provider %s for the ack page", provider_uuid,
+                       exc_info=True)
+            return None
+
 
 def _challenge() -> Response:
     """401 + a Basic challenge so a phone browser opens its native login prompt."""
@@ -183,12 +235,40 @@ class Anomaly(NamedTuple):
 
 
 def _owner_display(task) -> str:
-    """A human name for the Task's addressee, falling back to the bare reference."""
+    """A name for the Task's addressee from the resource ALONE, falling back to the bare
+    reference. `_resolve_addressee_name` is what turns that fallback into a real name."""
     owner = getattr(task, "owner", None)
     if owner is None:
         return "the intended recipient"
     return getattr(owner, "display", None) or getattr(owner, "reference", None) or \
         "the intended recipient"
+
+
+def _owner_provider_uuid(task) -> str:
+    """The bare uuid out of a `Practitioner/<uuid>` owner reference, '' when it is not one."""
+    ref = getattr(getattr(task, "owner", None), "reference", "") or ""
+    head, _, tail = ref.partition("/")
+    return tail if head == "Practitioner" and tail else ""
+
+
+async def _resolve_addressee_name(task, identity: OpenmrsIdentity, proof: Proof) -> str | None:
+    """Turn the addressee into something a clinician can read, or None to keep the fallback.
+
+    #130: the live ledger writes `Task.owner` as a reference with NO `display`, because the comms
+    agent carries the requester reference verbatim rather than dereferencing it across stores (see
+    that module's docstring, and the note on #130 about why the producer side stays that way). So
+    `_owner_display` returned `Practitioner/718bc49a-...` and the page asked a covering physician
+    to acknowledge on behalf of a uuid. That defeats the safeguard #127's decision rests on: the
+    whole reason a non-addressee ack is permitted is that the acknowledger READS who it was
+    actually sent to first.
+
+    Costs nothing on the ordinary path -- the caller only reaches here on a genuine mismatch --
+    and costs nothing when the resource already carries a display.
+    """
+    owner = getattr(task, "owner", None)
+    if owner is not None and getattr(owner, "display", None):
+        return None  # the resource already names them; no lookup earned
+    return await identity.provider_name(_owner_provider_uuid(task), proof)
 
 
 def _assess(task, caller: "Caller", now: datetime) -> Anomaly:
@@ -281,10 +361,13 @@ def create_ack_router(ledger, identity: OpenmrsIdentity) -> APIRouter:
     router = APIRouter()
 
     async def _resolve_caller(task_id: str, request: Request, sig: str):
-        """Signature, then identity. Returns `(caller, early_response)`; `early_response` is a
-        challenge to return as-is. Shared by both methods so the ordering guarantee cannot
+        """Signature, then identity. Returns `(caller, proof, early_response)`; `early_response`
+        is a challenge to return as-is. Shared by both methods so the ordering guarantee cannot
         drift between them: the signature is checked BEFORE any credential is solicited or any
-        session is consulted, on GET and POST alike."""
+        session is consulted, on GET and POST alike.
+
+        `proof` is whichever credential actually resolved the caller, so a follow-up read can be
+        made as them rather than as a service account (see `Proof`)."""
         # 1. The link itself must be genuine -- BEFORE any credential prompt.
         if not verify_ack_task(task_id, sig):
             raise HTTPException(status_code=403, detail="invalid acknowledgement link")
@@ -294,9 +377,12 @@ def create_ack_router(ledger, identity: OpenmrsIdentity) -> APIRouter:
         # cookie arrive). A cookie that no longer resolves falls through to Basic, not to a
         # refusal: stale sessions are routine.
         who = None
+        proof = Proof()
         jsessionid = request.cookies.get("JSESSIONID", "")
         if jsessionid:
             who = await identity.whoami_session(jsessionid)
+            if who is not None:
+                proof = Proof(cookies={"JSESSIONID": jsessionid})
 
         # 2b. Fallback: HTTP Basic. fastapi's HTTPBasic dependency is skipped on purpose: it
         # cannot order itself after the signature check, and the challenge must not fire for
@@ -304,15 +390,16 @@ def create_ack_router(ledger, identity: OpenmrsIdentity) -> APIRouter:
         if who is None:
             auth = request.headers.get("authorization", "")
             if not auth.lower().startswith("basic "):
-                return None, _challenge()
+                return None, None, _challenge()
             try:
                 username, _, password = base64.b64decode(auth[6:]).decode().partition(":")
             except Exception:
-                return None, _challenge()
+                return None, None, _challenge()
             who = await identity.whoami(username, password)
             if who is None:
-                return None, _challenge()
-        return who, None
+                return None, None, _challenge()
+            proof = Proof(auth=(username, password))
+        return who, proof, None
 
     async def _load(task_id: str):
         try:
@@ -330,6 +417,21 @@ def create_ack_router(ledger, identity: OpenmrsIdentity) -> APIRouter:
             except Exception:  # noqa: BLE001 -- the page must not fail over its garnish
                 finding = None
         return task, finding
+
+    async def _named(task, caller: Caller, proof: Proof) -> Anomaly:
+        """`_assess` plus a readable addressee. Split so `_assess` stays pure and synchronous:
+        deciding WHETHER this is a delegated or late ack is a rule, and must be testable without
+        a network. Naming the addressee is I/O, is best-effort, and only happens on the mismatch
+        path (#130).
+
+        One resolution feeds BOTH the page and the ledger note, which is what stops the audit
+        record and the confirmation page telling different stories about the same ack.
+        """
+        anomaly = _assess(task, caller, datetime.now(timezone.utc))
+        if anomaly.on_behalf_of is None:
+            return anomaly
+        name = await _resolve_addressee_name(task, identity, proof)
+        return anomaly._replace(on_behalf_of=name) if name else anomaly
 
     def _already(finding: str | None) -> HTMLResponse:
         return _page("Already acknowledged", [
@@ -349,26 +451,26 @@ def create_ack_router(ledger, identity: OpenmrsIdentity) -> APIRouter:
         because a prefetch carries no credentials. So the state change moved to POST and this
         GET only asks. The click on the button is still the only click the physician makes.
         """
-        caller, early = await _resolve_caller(task_id, request, sig)
+        caller, proof, early = await _resolve_caller(task_id, request, sig)
         if early is not None:
             return early
         task, finding = await _load(task_id)
         if task.status in _ACKED:
             return _already(finding)
-        return _confirm_page(task_id, sig, caller.who, finding,
-                             _assess(task, caller, datetime.now(timezone.utc)))
+        anomaly = await _named(task, caller, proof)
+        return _confirm_page(task_id, sig, caller.who, finding, anomaly)
 
     @router.post("/ack/{task_id}")
     async def acknowledge(task_id: str, request: Request, sig: str = "") -> Response:
         """The state change: submitted from the confirmation page's button."""
-        caller, early = await _resolve_caller(task_id, request, sig)
+        caller, proof, early = await _resolve_caller(task_id, request, sig)
         if early is not None:
             return early
         task, finding = await _load(task_id)
         if task.status in _ACKED:
             return _already(finding)
 
-        anomaly = _assess(task, caller, datetime.now(timezone.utc))
+        anomaly = await _named(task, caller, proof)
         await ledger.complete_ack_task(
             task_id, acknowledged_by=caller.who, at_iso=now_iso(),
             on_behalf_of=anomaly.on_behalf_of,
