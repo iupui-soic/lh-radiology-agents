@@ -21,7 +21,8 @@ import os
 import time
 
 from omrs_client import OmrsClient
-from report_text import FHIR2_CONCLUSION_MAX, clamp_conclusion, strip_html
+from report_text import (FHIR2_CONCLUSION_MAX, clamp_conclusion, has_impression,
+                         strip_html)
 
 POLL_SECONDS = int(os.environ.get("BRIDGE_POLL_SECONDS", "10"))
 
@@ -49,6 +50,21 @@ MISS_LOG_EVERY = 30
 # a final chart record is a deliberate per-deployment call, not a silent default.
 OVERWRITE_STALE_FINAL = (
     os.environ.get("BRIDGE_OVERWRITE_STALE_FINAL", "").strip().lower() in ("1", "true", "yes"))
+
+# The #105 Class B guard. Three cohort studies reached the host with their IMPRESSION gone --
+# head kept, tail dropped exactly at the header. Nothing in this repo makes that shape
+# (clamp_conclusion keeps the TAIL and never fires under the cap; strip_html never collapses
+# whitespace runs), so it arrived RIS-side. This bridge is the only writer that projects RIS
+# text onto a seeded DiagnosticReport, so it is the only place that can turn such a body into
+# a destroyed chart narrative -- and it did so unconditionally.
+#
+# So: never trade an impression for one that has none. Verification parses `conclusion` and the
+# flip-to-final rehearsal cues on that section, so losing it degrades both silently. Same
+# posture as the stale-final refusal above -- refuse, log loudly, and KEEP RETRYING, so a
+# restage or a corrected re-sign bridges on the next cycle with no restart. Set to 1/true when
+# a radiologist really does sign a body with no impression and the projection must land anyway.
+ALLOW_IMPRESSION_LOSS = (
+    os.environ.get("BRIDGE_ALLOW_IMPRESSION_LOSS", "").strip().lower() in ("1", "true", "yes"))
 
 
 def _note_miss(missing: dict[int, int], report_id: int, what: str) -> None:
@@ -171,6 +187,17 @@ def bridge_cycle(conn, c, bridged: set[int], missing: dict[int, int]) -> None:
                       f"({len(r.get('conclusion') or '')} chars stored vs {len(body_text)} signed); "
                       f"BRIDGE_OVERWRITE_STALE_FINAL is set, projecting the human sign over it",
                       flush=True)
+        if (not ALLOW_IMPRESSION_LOSS and has_impression(r.get("conclusion") or "")
+                and not has_impression(conclusion)):
+            # Not added to `bridged`: keep retrying, so a corrected re-sign or a restage is
+            # picked up without a container restart -- the same cadence as a resolve miss.
+            _note_miss(missing, report_id,
+                       f"signed body for {accession} has NO IMPRESSION but seeded "
+                       f"DiagnosticReport/{fhir_id} does ({len(r.get('conclusion') or '')} chars "
+                       f"stored vs {len(conclusion)} signed); REFUSING to overwrite -- this is "
+                       f"the #105 Class B shape. Re-sign with the impression, restage the study, "
+                       f"or set BRIDGE_ALLOW_IMPRESSION_LOSS=1")
+            continue
         missing.pop(report_id, None)
         if was_truncated:
             print(f"report {report_id}: signed body is {len(body_text)} chars but fhir2 caps "

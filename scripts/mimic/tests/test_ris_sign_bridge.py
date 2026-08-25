@@ -413,3 +413,98 @@ def test_concept_override_env_is_honoured(monkeypatch):
     c = _client_with_bundle(monkeypatch, _bundle(
         _dr("draft-1", code="custom-concept"), _dr("seeded-1")))
     assert c.find_seeded_report("p", "o") == "seeded-1"
+
+
+# --- #105 Class B: never trade an impression for one that has none ---------
+
+# The exact shape the three host studies arrived in: the head kept, the tail dropped at the
+# IMPRESSION header, whitespace runs collapsed. Synthetic text, real shape -- a cohort
+# subject's narrative is patient data and never belongs in a fixture.
+_SEEDED_FULL = ("INDICATION: Dyspnoea. FINDINGS: Small right apical pneumothorax with no "
+                "mediastinal shift. IMPRESSION: Small right apical pneumothorax; recommend "
+                "follow-up radiograph.")
+_HEAD_ONLY = ("INDICATION: Dyspnoea. FINDINGS: Small right apical pneumothorax with no "
+              "mediastinal shift.")
+_ROW_HEAD_ONLY = (7, f"<p>{_HEAD_ONLY}</p>", "s123", "Jake", "Doctor", "prov-uuid-1", SIGNED_AT)
+
+
+def test_a_signed_body_that_lost_its_impression_does_not_overwrite_the_seed(monkeypatch, capsys):
+    """The #105 Class B defect, at the only writer that can cause it. Three cohort studies
+    reached the host with the impression gone; verification parses `conclusion` and the
+    flip-to-final rehearsal cues on that section, so the loss degrades both silently."""
+    c = _FakeClient(order={"patient_uuid": "p", "order_uuid": "o"}, fhir_id="dr-1",
+                    report={"status": "preliminary", "conclusion": _SEEDED_FULL})
+    bridged, missing = set(), {}
+    _rows(monkeypatch, [_ROW_HEAD_ONLY])
+    bridge.bridge_cycle(None, c, bridged, missing)
+    out = capsys.readouterr().out
+    assert not c.put_calls, "the seeded narrative must survive"
+    assert "NO IMPRESSION" in out and "s123" in out and "#105" in out
+    assert "BRIDGE_ALLOW_IMPRESSION_LOSS" in out and "restage" in out, \
+        "the line must name the remedies"
+    assert 7 not in bridged, "a refusal must keep retrying, so a corrected re-sign bridges"
+
+
+def test_a_corrected_re_sign_bridges_without_a_restart(monkeypatch):
+    c = _FakeClient(order={"patient_uuid": "p", "order_uuid": "o"}, fhir_id="dr-1",
+                    report={"status": "preliminary", "conclusion": _SEEDED_FULL})
+    bridged, missing = set(), {}
+    _rows(monkeypatch, [_ROW_HEAD_ONLY])
+    bridge.bridge_cycle(None, c, bridged, missing)
+    assert not c.put_calls
+    _rows(monkeypatch, [(7, f"<p>{_SEEDED_FULL}</p>", "s123", "Jake", "Doctor",
+                         "prov-uuid-1", SIGNED_AT)])
+    bridge.bridge_cycle(None, c, bridged, missing)
+    assert 7 in bridged and c.put_calls, "the corrected sign must land on the next cycle"
+    (_, body), = c.put_calls
+    assert "IMPRESSION" in body["conclusion"] and body["status"] == "final"
+
+
+def test_impression_loss_is_projected_when_the_flag_says_so(monkeypatch):
+    # A radiologist may genuinely sign a body with no impression; the operator can say so.
+    monkeypatch.setattr(bridge, "ALLOW_IMPRESSION_LOSS", True)
+    c = _FakeClient(order={"patient_uuid": "p", "order_uuid": "o"}, fhir_id="dr-1",
+                    report={"status": "preliminary", "conclusion": _SEEDED_FULL})
+    bridged, missing = set(), {}
+    _rows(monkeypatch, [_ROW_HEAD_ONLY])
+    bridge.bridge_cycle(None, c, bridged, missing)
+    (_, body), = c.put_calls
+    assert body["conclusion"] == _HEAD_ONLY and 7 in bridged
+
+
+def test_the_guard_does_not_block_a_seed_that_never_had_an_impression(monkeypatch):
+    # Only a LOSS is refused. A seed with no impression cannot lose one, so the sign lands.
+    c = _FakeClient(order={"patient_uuid": "p", "order_uuid": "o"}, fhir_id="dr-1",
+                    report={"status": "preliminary", "conclusion": "FINDINGS: seed."})
+    bridged, missing = set(), {}
+    _rows(monkeypatch, [_ROW_HEAD_ONLY])
+    bridge.bridge_cycle(None, c, bridged, missing)
+    assert c.put_calls and 7 in bridged
+
+
+def test_a_conclusion_header_counts_as_an_impression(monkeypatch):
+    # report_body folds CONCLUSION into the impression key; the guard must fold it too, or a
+    # report that says CONCLUSION reads as impression-less and is refused for nothing.
+    c = _FakeClient(order={"patient_uuid": "p", "order_uuid": "o"}, fhir_id="dr-1",
+                    report={"status": "preliminary", "conclusion": _SEEDED_FULL})
+    bridged, missing = set(), {}
+    _rows(monkeypatch, [(7, f"<p>{_HEAD_ONLY} CONCLUSION: No pneumothorax.</p>", "s123",
+                         "Jake", "Doctor", "prov-uuid-1", SIGNED_AT)])
+    bridge.bridge_cycle(None, c, bridged, missing)
+    assert c.put_calls and 7 in bridged, "a CONCLUSION section is an impression"
+
+
+def test_a_clamped_long_body_keeps_its_impression_and_still_bridges(monkeypatch):
+    # The clamp keeps the TAIL, so a truncated sign still carries IMPRESSION and must not trip
+    # the guard -- otherwise every over-cap report would be refused.
+    long_body = "INDICATION: " + ("history " * 200) + _SEEDED_FULL
+    assert len(long_body) > FHIR2_CONCLUSION_MAX
+    c = _FakeClient(order={"patient_uuid": "p", "order_uuid": "o"}, fhir_id="dr-1",
+                    report={"status": "preliminary", "conclusion": _SEEDED_FULL})
+    bridged, missing = set(), {}
+    _rows(monkeypatch, [(7, f"<p>{long_body}</p>", "s123", "Jake", "Doctor",
+                         "prov-uuid-1", SIGNED_AT)])
+    bridge.bridge_cycle(None, c, bridged, missing)
+    assert c.put_calls and 7 in bridged
+    (_, body), = c.put_calls
+    assert "IMPRESSION" in body["conclusion"]
