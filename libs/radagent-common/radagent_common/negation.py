@@ -290,6 +290,9 @@ _HEADER_RE = re.compile(r"(?i)\b(" + "|".join(re.escape(h) for h in _ALL_HEADERS
 _SUB_HEADER_RE = re.compile(r"(?m)^[ \t]*([A-Z][A-Za-z /-]{1,30}?)" + _HEADER_SEP)
 
 
+_SENTENCE_END = re.compile(r"[.;]")
+
+
 def _clamped_skip_end(text: str, body_start: int, hard_end: int) -> int:
     """Where a skipped section's PROVABLE content ends: its header line plus hard-wrap
     continuations.
@@ -318,7 +321,10 @@ def _clamped_skip_end(text: str, body_start: int, hard_end: int) -> int:
         but a real false page, not a harmless leak.
     """
     lines = text[body_start:hard_end].split("\n")
-    end_offset = len(lines[0])
+    first_end = _SENTENCE_END.search(lines[0])
+    end_offset = first_end.end() if first_end else len(lines[0])
+    if first_end:
+        return body_start + end_offset
     prev = lines[0]
     for line in lines[1:]:
         if not line.strip() or prev.rstrip().endswith((".", ";")):

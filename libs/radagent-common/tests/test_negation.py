@@ -440,3 +440,54 @@ def test_residual_later_sentences_of_a_multiline_skip_paragraph_leak_and_flag():
         "pneumothorax"]                                       # ...and it FLAGS (plain terms,
     # exactly how both scanners call this function -- a regex passed as a term is re.escape()d
     # and can never match, which is how the first cut of this pin managed to assert nothing)
+
+
+# --- #131: a narrative with no line breaks defeated the skip clamp ---------
+
+def test_a_skip_section_stops_at_its_first_sentence_even_with_no_line_breaks():
+    """#131. _clamped_skip_end consumed lines[0] whole, so a narrative with NO newline had
+    nothing to stop at and the skip swallowed to the next header -- the pre-clamp behaviour
+    this function exists to prevent. The RIS path produces exactly that shape: TinyMCE bodies
+    are <p>-delimited, and strip_html replaces tags with a SPACE, so a signed report reaches
+    fhir2 as one line."""
+    one_line = ("FINDINGS: Interval change. IMPRESSION: Limited by technique: portable AP film. "
+                "Large left pneumothorax is present.")
+    assert "pneumothorax" in scannable_text(one_line)
+
+
+def test_the_multi_line_path_still_drops_a_hard_wrapped_skip_section():
+    """The clamp's original job, unchanged: a skip header line that does not finish a sentence
+    still consumes its hard-wrap continuation."""
+    wrapped = ("COMPARISON: chest CT dated\n2024 with no acute finding\n"
+               "FINDINGS: Large left pneumothorax is present.")
+    out = scannable_text(wrapped)
+    assert "pneumothorax" in out, "the FINDINGS section must still be scanned"
+    assert "2024 with no acute finding" not in out, "the continuation is still the skip's prose"
+
+
+def test_a_genuine_indication_is_still_dropped_on_one_line():
+    """The safe direction must not invert: the indication names the SUSPICION, not a finding,
+    and re-flagged every normal study before it was skipped (#78)."""
+    normal = ("INDICATION: Rule out pneumothorax after line placement. "
+              "FINDINGS: Lungs clear. IMPRESSION: No acute cardiopulmonary process.")
+    out = scannable_text(normal)
+    assert "Rule out pneumothorax" not in out, "the indication must stay dropped"
+
+
+def test_a_semicolon_ends_a_skip_clause_the_same_as_a_full_stop():
+    """The multi-line clamp has always treated "." and ";" alike; the single-line clamp must
+    agree, or the same dictation is scanned or dropped depending on its punctuation."""
+    one_line = ("COMPARISON: none available; Large left pneumothorax is present. "
+                "IMPRESSION: See findings.")
+    assert "pneumothorax" in scannable_text(one_line)
+
+
+def test_a_completed_sentence_stops_the_skip_before_its_wrap_chain():
+    """The first line may CONTAIN a sentence end without ENDING on one. The clamp stops at that
+    sentence; it must not then go on consuming hard-wrap continuations, or the finding sitting
+    on the next line is swallowed by a section that already finished."""
+    wrapped = ("TECHNIQUE: portable AP film. Large left pneumothorax\n"
+               "is present and under tension\n"
+               "IMPRESSION: See findings.")
+    out = scannable_text(wrapped)
+    assert "pneumothorax" in out, "the skip ended at its first sentence; the rest is scanned"
