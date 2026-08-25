@@ -63,33 +63,63 @@ stateDiagram-v2
 
 ```mermaid
 sequenceDiagram
-  participant O as Orthanc
+  autonumber
+  participant O as Orthanc PACS
   participant I as Ingress
   participant W as StudyWorkflow
-  participant A as Agents (A2A)
-  participant R as RIS (OpenMRS)
+  participant A as A2A agents
+  participant WL as Worklist API
+  participant Rad as Radiologist
+  participant F as RIS and fhir2
   participant C as Communications
 
-  O->>I: OnStableStudy (webhook)
-  I->>W: start workflow (id = wf_<orthancStudyId>)
-  par pre-read fan-out
+  O->>I: OnStableStudy webhook
+  I->>F: resolve patient and order by accession number
+  I->>W: start workflow, one instance per study
+
+  Note over W,A: RECEIVED — parallel pre-read fan-out
+  par
     W->>A: triage.score
+  and
     W->>A: ehr.assembleContext
+  and
     W->>A: interpretation.runTools
   end
-  W->>W: READY_FOR_READ (publish priority)
-  Note over R: radiologist authors & signs report
-  I->>R: poll DiagnosticReport status=final
-  I-->>W: signal report_finalized
-  W->>A: impression.generate
-  W->>A: report.verify
-  alt PASS
-    W->>C: comms.dispatch
-  else WARN/FAIL + human review
-    W->>W: AWAITING_SIGNOFF (timer)
-    W->>A: report.verify (re-run)
+
+  Note over W,WL: READY_FOR_READ
+  W->>WL: publish priority tier and score
+  W->>WL: publish AI findings
+
+  opt at least one COMPLETE finding
+    W->>A: impression.generate
+    A-->>W: draft impression text
+    W->>F: write preliminary DiagnosticReport, authorship-stamped
   end
-  W->>W: ARCHIVED
+
+  Note over W: AWAITING_RADIOLOGIST — durable wait
+  Rad->>WL: open the reading worklist
+  Rad->>O: view images
+  Rad->>F: author and sign the report
+
+  I->>F: poll DiagnosticReport status=final since cursor
+  F-->>I: finalized report
+  I-->>W: signal report_finalized
+
+  Note over W: IMPRESSION
+  W->>A: impression.generate
+  Note over W: VERIFY
+  W->>A: report.verify
+  A-->>W: PASS
+
+  Note over W,C: COMMUNICATE
+  W->>C: comms.dispatch
+  C->>F: notification into the chart
+  C-->>W: ack Task and deadline
+  W->>C: comms.checkAck
+  C-->>W: acknowledged
+
+  Note over W: ARCHIVED
+  W->>WL: publish read state
 ```
 
 ## Trigger map
