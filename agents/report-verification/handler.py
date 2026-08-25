@@ -18,7 +18,7 @@ from radagent_common.fhir_client import Fhir2Client
 from radagent_common.tracing import now_iso
 from rules.engine import enrich_report_body, load_rules, run_rules
 
-AGENT_VERSION = "0.1.0"
+AGENT_VERSION = "0.2.0"
 _RULES_DIR = Path(__file__).resolve().parent / "rules"
 # Loaded and validated ONCE, at import (#96): server.py imports this module, so a malformed rule
 # file refuses to boot the agent with an error naming the file. Before this, run_rules re-read the
