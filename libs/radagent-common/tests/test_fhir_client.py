@@ -1222,3 +1222,27 @@ def test_missing_report_or_order_is_none_not_a_crash():
     client._get = fake_get  # type: ignore[assignment]
     assert asyncio.run(client.get_diagnostic_report("nope")) is None
     assert asyncio.run(client.get_service_request("nope")) is None
+
+
+# --- #135: the projector must not discard the substance --------------------
+
+def test_lean_allergy_keeps_a_coded_display():
+    from radagent_common.fhir_client import _lean_allergy
+    out = _lean_allergy({"code": {"coding": [
+        {"system": "http://snomed.info/sct", "code": "426232007",
+         "display": "Allergy to contrast dye"}]}})
+    assert out == {"code": "426232007", "display": "Allergy to contrast dye"}
+
+
+def test_lean_allergy_keeps_the_free_text_of_an_uncoded_allergy():
+    """The case that made #135 unfixable downstream: with no coding, the CodeableConcept `text`
+    is the ONLY carrier of the substance, and it was being thrown away -- the record projected
+    to {"code": ""} and no consumer could tell a contrast allergy from a peanut one."""
+    from radagent_common.fhir_client import _lean_allergy
+    out = _lean_allergy({"code": {"text": "Iodinated contrast media"}})
+    assert out == {"code": "", "display": "Iodinated contrast media"}
+
+
+def test_lean_allergy_omits_display_when_there_is_none():
+    from radagent_common.fhir_client import _lean_allergy
+    assert _lean_allergy({"code": {"coding": [{"code": "91936005"}]}}) == {"code": "91936005"}

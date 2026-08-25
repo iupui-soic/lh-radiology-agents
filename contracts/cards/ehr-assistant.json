@@ -2,7 +2,7 @@
   "name": "EHR Assistant Agent",
   "description": "Assembles decision-relevant priors, labs, problems and safety flags from OpenMRS fhir2.",
   "url": "http://ehr-assistant:8102/",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "capabilities": { "streaming": true, "pushNotifications": true },
   "defaultInputModes": ["application/json"],
   "defaultOutputModes": ["application/json"],
