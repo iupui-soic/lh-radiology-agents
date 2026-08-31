@@ -491,3 +491,16 @@ def test_a_completed_sentence_stops_the_skip_before_its_wrap_chain():
                "IMPRESSION: See findings.")
     out = scannable_text(wrapped)
     assert "pneumothorax" in out, "the skip ended at its first sentence; the rest is scanned"
+
+
+def test_a_date_inside_a_skip_section_does_not_end_it():
+    """The single-line clamp must not fire on a dot that ends no sentence. A skip section
+    routinely carries a date, and clamping inside "1.5.2026" leaks the remainder of the section
+    back into the scan -- raising a critical off a prior that the same sentence says is
+    resolved. Over-flag is the safe direction for this module, but this one is avoidable."""
+    dated = ("FINDINGS: Lungs clear.\n"
+             "COMPARISON: CT 1.5.2026 demonstrated a large right pneumothorax, since resolved.\n"
+             "IMPRESSION: Normal chest.")
+    out = scannable_text(dated)
+    assert "pneumothorax" not in out, "the comparison section must stay dropped whole"
+    assert "Normal chest" in out, "the impression must still be scanned"
