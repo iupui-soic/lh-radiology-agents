@@ -312,13 +312,34 @@ def _clamped_skip_end(text: str, body_start: int, hard_end: int) -> int:
     or a new line after a completed sentence, is no longer provably the section's own prose and
     is scanned instead (doubt resolves toward scanning).
 
+    THE SAME RULE APPLIES WITHIN A LINE (#131). A skip section ends at the first sentence
+    terminator on its first line, and only falls through to the hard-wrap chain when that line
+    finished no sentence. Clamping on the LINE boundary alone was an accident of how the rule
+    was first written, and production does not have line boundaries: `strip_html` replaces tags
+    with a SPACE and TinyMCE bodies are <p>-delimited, so a report authored or edited in the RIS
+    reaches fhir2 as ONE line. With no newline to stop at, the skip ran to the end of the text
+    and deleted every finding after it -- the pre-clamp behaviour, reproduced. Seeded narratives
+    keep their newlines and were never affected, which is why the cohort looked clean until a
+    human touched a study.
+
+    A terminator must be FOLLOWED BY WHITESPACE (or end the text), because a bare [.;] also
+    matches inside a decimal or an abbreviation. Without that, "COMPARISON: CT 1.5.2026
+    demonstrated a large right pneumothorax, since resolved" clamps at the dot in the date and
+    leaks the rest of the section back into the scan, raising a critical off a prior that the
+    same sentence says is resolved.
+
     KNOWN RESIDUALS of the terminal-punctuation proxy (pinned in tests, accepted per the module
-    policy -- both are strictly SMALLER errors than the pre-clamp swallow-to-next-header):
-      * UNDER-flag: a skip header line that does NOT end a sentence ("COMPARISON: chest CT
-        2024") consumes the following continuation CHAIN -- every line up to the first one that
-        ends in ./; (or a blank line / the next header). A finding dictated there, including a
-        hard-wrapped one swallowed whole, is silenced. The pre-clamp behaviour silenced
-        everything to the next header; this residual ends at the first completed sentence.
+    policy -- all are strictly SMALLER errors than the pre-clamp swallow-to-next-header):
+      * UNDER-flag: a skip header line that does NOT end a sentence ANYWHERE ("COMPARISON: chest
+        CT 2024") consumes the following continuation CHAIN -- every line up to the first one
+        that ends in ./; (or a blank line / the next header). A finding dictated there, including
+        a hard-wrapped one swallowed whole, is silenced. The pre-clamp behaviour silenced
+        everything to the next header; this residual ends at the first completed sentence, and
+        since #131 it is smaller again: a first line that completes a sentence never reaches the
+        chain at all.
+      * OVER-flag: an abbreviation or an ordinal followed by a space ("Dr. Smith", "1. Chest")
+        ends the skip early, so the remainder of that section is scanned. Same tolerated
+        direction as the residual below, and smaller: it costs a section's tail, not a page.
       * OVER-flag: the second-and-later sentences of a MULTI-LINE skip paragraph whose lines
         each end in "." leak into scanning, and a rule-out phrase there DOES flag ("Obtained to
         exclude pneumothorax" asserts: "to exclude" is not a negation cue, and the hedge rule

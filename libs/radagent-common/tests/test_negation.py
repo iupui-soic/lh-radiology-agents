@@ -504,3 +504,23 @@ def test_a_date_inside_a_skip_section_does_not_end_it():
     out = scannable_text(dated)
     assert "pneumothorax" not in out, "the comparison section must stay dropped whole"
     assert "Normal chest" in out, "the impression must still be scanned"
+
+
+def test_the_abbreviation_over_flag_residual_is_what_the_docstring_says():
+    """#131. `_clamped_skip_end`'s docstring calls these residuals "pinned in tests", so pin
+    this one. An abbreviation or ordinal followed by a space ends the skip early and the rest
+    of the section is scanned. Tolerated per the module policy (doubt resolves toward scanning)
+    and strictly smaller than the pre-clamp swallow, but it is a real leak, so it is recorded
+    here rather than left to be rediscovered."""
+    out = scannable_text("HISTORY: Referred by Dr. Smith for pneumothorax follow up.\n"
+                         "FINDINGS: Clear.")
+    assert "pneumothorax" in out, "the residual is real: the history tail leaks into the scan"
+
+
+def test_a_decimal_does_not_end_a_skip_section():
+    """The other side of the same rule, and the reason the terminator requires trailing
+    whitespace. A date inside a skipped section must not clamp it, or the section's remainder
+    raises a critical off a prior the same sentence calls resolved."""
+    out = scannable_text("COMPARISON: CT 1.5.2026 demonstrated a large right pneumothorax, "
+                         "since resolved.\nFINDINGS: Clear.")
+    assert "pneumothorax" not in out, "the comparison section must stay dropped whole"
