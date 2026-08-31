@@ -89,6 +89,25 @@ origin the #75 Caddy overlay serves. Nothing else is reachable off-box.
 5b. `ris-sign-bridge` is up (`docker compose ps ris-sign-bridge`): the module's sign emit is
    broken (ServiceNotFoundException, swallowed), so without the bridge a signed report never
    reaches fhir2/the poller and every read parks at the gate (workaround for #70; real fix o3).
+5c. **18 of the 100 cohort narratives are missing their opening section, by decision, not by
+   accident (#105 Class A, PI ruling 2026-09-01).** `report_text.FHIR2_CONCLUSION_MAX` is 1024
+   because fhir2 rejects a longer `conclusion` outright (a 1058-char PUT returns 422), so the
+   ETL seeds those 18 through `clamp_conclusion`, which drops the preamble and keeps the tail.
+   Swept live on 2026-09-01: all 18 are over the cap, all 18 byte-match `clamp_conclusion`
+   output, and all 18 still carry their IMPRESSION. Nothing is misbehaving.
+
+   **The ruling is to accept the clamp rather than carry the full text in `presentedForm`.**
+   What the clamp drops is history and wet-read preamble; what a referring physician reads,
+   what verification parses, and what the flip-to-final cue keys on all survive it. Moving the
+   full text to `presentedForm` would add a NEW write shape into fhir2, and golden rule 2 keeps
+   fhir2 read-mostly with #26 as the one authorized write path after a named review. A cosmetic
+   gain does not clear that bar.
+
+   So: if someone opens one of these 18 and asks where the history went, the answer is that the
+   column is capped at 1024 and we keep the clinically load-bearing end. Do not improvise a
+   different answer, and do not treat it as a bug on the day. The remaining 2 studies that
+   differ from source are simply the ones already signed through the RIS.
+
 6. Smoke: `https://demo.example.org/` → 401 without the proxy login; `/reading` lists the
    cohort after login; one seeded `report_seeder.py finalize` releases a test study end to end.
 7. **Write down the `reportId` of every study you plan to open.** Any study with a COMPLETE
