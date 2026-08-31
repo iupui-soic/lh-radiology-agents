@@ -372,6 +372,44 @@ def test_an_unrelated_study_still_falls_back_to_the_generic_screen():
     # exclusion and this selects aortic-dissection-detect.
     ("CT", "CT AORTIC VALVE TAVR PLANNING", ["generic-ct-screen"]),
     ("CT", "CT AORTIC VALVE TAVR-PLANNING PROTOCOL", ["generic-ct-screen"]),
+    # REVERSED 2026-08-06 (#64): the same ruling now covers a dedicated aortic-root study. The
+    # 2026-07-15 call kept the root matched ("a type-A dissection genuinely involves the root");
+    # the reversal is that a root study is ORDERED as valve/annulus sizing, not on the dissection
+    # question -- "a screening detector firing there adds noise where a specialist is already
+    # looking at the root". This row previously asserted the opposite and is changed deliberately.
+    ("CT", "CT CARDIAC AORTIC ROOT",       ["generic-ct-screen"]),
+    ("CT", "CT ROOT OF AORTA",             ["generic-ct-screen"]),
+    ("CT", "CT ROOT OF THE AORTA",         ["generic-ct-screen"]),
+    # the post-operative rescue is keyed on specific cues, not a bare "post": a sizing study
+    # written as "post contrast" must NOT be rescued by that word alone.
+    ("CT", "CT AORTIC ROOT POST CONTRAST", ["generic-ct-screen"]),
+    ("CT", "CT AORTIC ROOT ANNULUS SIZING", ["generic-ct-screen"]),
+    ("CT", "CT AORTIC ROOT MEASUREMENT",   ["generic-ct-screen"]),
+    ("CT", "CT AORTIC ROOT VALVE SIZING",  ["generic-ct-screen"]),
+    ("CT", "CT HEART AORTIC ROOT ANNULUS", ["generic-ct-screen"]),
+    ("CT", "CT CARDIAC GATED AORTIC ROOT", ["generic-ct-screen"]),
+    ("CT", "CT AORTIC ROOT PRE TAVI",      ["generic-ct-screen"]),
+    ("CT", "CT AORTIC ROOT WITH CONTRAST", ["generic-ct-screen"]),
+    ("CT", "CT AORTIC ROOT NON CONTRAST",  ["generic-ct-screen"]),
+    # ordinary sizing vocabulary must not collide with a rescue cue. "PRE OP" in particular: the
+    # post-operative rescue is `post-op`, so a PRE-operative planning CT is still a sizing study.
+    ("CT", "CT AORTIC ROOT ANNULAR MEASUREMENT", ["generic-ct-screen"]),
+    ("CT", "CT AORTIC ROOT PRE OP PLANNING",     ["generic-ct-screen"]),
+    ("CT", "CT AORTIC ROOT CALCIUM SCORE",       ["generic-ct-screen"]),
+    ("CT", "CT AORTIC ROOT 3D RECON",            ["generic-ct-screen"]),
+    ("CT", "CT AORTIC ROOT VOLUME",              ["generic-ct-screen"]),
+    # A DECLARED planning study stays excluded whatever territory it names, and that asymmetry is
+    # deliberate: a real TAVR-planning CT covers the iliofemoral access run and often the arch, so
+    # the "root is only the scan range" rescue below would undo !82 on the commonest real protocol
+    # names. Every row here selects aortic-dissection-detect with the exclusion removed, so none of
+    # them passes by merely failing to name the region.
+    ("CT", "CT AORTIC VALVE TAVR PLANNING WITH ILIOFEMORAL RUNOFF",    ["generic-ct-screen"]),
+    ("CT", "CT AORTIC VALVE TAVR PLANNING ROOT AND ARCH",              ["generic-ct-screen"]),
+    ("CT", "CT AORTIC VALVE TAVR-PLANNING AORTA TO ILIAC BIFURCATION", ["generic-ct-screen"]),
+    ("CT", "CT TAVR PLANNING THORACIC AORTA",                          ["generic-ct-screen"]),
+    # ...but an explicit dissection mention beats the exclusion, because a wrong exclusion DELETES
+    # a screen. Same principle as the post-TAVR row below.
+    ("CT", "CT AORTIC ROOT DISSECTION PROTOCOL", ["aortic-dissection-detect"]),
 ])
 def test_a_region_named_but_not_the_subject_does_not_select_its_tools(modality, description, expected):
     assert select_tools(modality, description) == expected
@@ -395,12 +433,94 @@ def test_a_region_named_but_not_the_subject_does_not_select_its_tools(modality, 
     ]),
     ("CT", "CT HEAD AND FEMUR TRAUMA",     ["ich-detect", "stroke-detect"]),
     ("CT", "CT BRAIN AND SHOULDER",        ["ich-detect", "stroke-detect"]),
-    # a dedicated aortic-root study keeps the dissection screen (#64, PI ruling: a type-A
-    # dissection genuinely involves the root -- "leave it")
-    ("CT", "CT CARDIAC AORTIC ROOT",       ["aortic-dissection-detect"]),
     # the TAVR exclusion is the "tavr planning" bigram, not the bare acronym: post-TAVR
     # surveillance of the aorta is a population that CAN dissect and keeps its screen
     ("CT", "CT AORTA POST TAVR",           ["aortic-dissection-detect"]),
+    # ...and the SAME reasoning has to survive the #64 root exclusion, or the two rules describe
+    # one clinical situation two ways. A root that has been replaced, repaired, grafted or stented
+    # is surveillance in a population that can dissect, at HIGHER risk than an unoperated one
+    # (anastomotic pseudoaneurysm, new dissection at the suture line). The first cut of the root
+    # exclusion dropped the screen on every row below while `CT AORTA POST TAVR` above kept one.
+    ("CT", "CT AORTIC ROOT REPLACEMENT FOLLOW UP",    ["aortic-dissection-detect"]),
+    ("CT", "CT POST AORTIC ROOT REPAIR",              ["aortic-dissection-detect"]),
+    ("CT", "CT CHEST AORTIC ROOT GRAFT SURVEILLANCE", [
+        "lung-nodule-detect", "pe-detect", "aortic-dissection-detect",
+    ]),
+    ("CT", "CT AORTIC ROOT S/P REPAIR",               ["aortic-dissection-detect"]),
+    ("CT", "CT AORTIC ROOT STENT FOLLOW-UP",          ["aortic-dissection-detect"]),
+    # the same family under the words a cardiothoracic department actually uses. `\w*graft` rather
+    # than `graft` is what carries homograft/allograft/endograft; Bentall is the composite root
+    # replacement by its eponym, and an endoleak or a prosthetic root implies the hardware without
+    # naming the operation.
+    ("CT", "CT AORTIC ROOT POST BENTALL",             ["aortic-dissection-detect"]),
+    ("CT", "CT AORTIC ROOT BENTALL",                  ["aortic-dissection-detect"]),
+    ("CT", "CT AORTIC ROOT HOMOGRAFT",                ["aortic-dissection-detect"]),
+    ("CT", "CT AORTIC ROOT ALLOGRAFT",                ["aortic-dissection-detect"]),
+    ("CT", "CT AORTIC ROOT CONDUIT",                  ["aortic-dissection-detect"]),
+    ("CT", "CT AORTIC ROOT ENDOLEAK",                 ["aortic-dissection-detect"]),
+    ("CT", "CT AORTIC ROOT PROSTHETIC VALVE",         ["aortic-dissection-detect"]),
+    ("CT", "CT CHEST REDO STERNOTOMY AORTIC ROOT",    [
+        "lung-nodule-detect", "pe-detect", "aortic-dissection-detect",
+    ]),
+    # ACUTE AORTIC SYNDROME. Intramural haematoma and penetrating ulcer are the other two thirds of
+    # the triad with dissection and are there BECAUSE they are hard to tell apart; a ruptured or
+    # transected root may be dissecting now. "Ordered on a known workup, not on suspicion of
+    # dissection" -- the reversal's own test -- describes none of these.
+    ("CT", "CT AORTIC ROOT R/O DISSECTION",           ["aortic-dissection-detect"]),
+    ("CT", "CT AORTIC ROOT RUPTURE",                  ["aortic-dissection-detect"]),
+    ("CT", "CT AORTIC ROOT RUPTURED ANEURYSM",        ["aortic-dissection-detect"]),
+    ("CT", "CT AORTIC ROOT INTRAMURAL HEMATOMA",      ["aortic-dissection-detect"]),
+    # both spellings: a department that types HAEMATOMA must not get a different screen
+    ("CT", "CT AORTIC ROOT INTRAMURAL HAEMATOMA",     ["aortic-dissection-detect"]),
+    ("CT", "CT AORTIC ROOT PENETRATING ULCER",        ["aortic-dissection-detect"]),
+    ("CT", "CT AORTIC ROOT PENETRATING ATHEROSCLEROTIC ULCER", ["aortic-dissection-detect"]),
+    ("CT", "CT ACUTE AORTIC SYNDROME ROOT OF AORTA",  ["aortic-dissection-detect"]),
+    ("CT", "CT EMERGENT AORTIC ROOT",                 ["aortic-dissection-detect"]),
+    ("CT", "CT EMERGENCY AORTIC ROOT",                ["aortic-dissection-detect"]),
+    # ...and under the abbreviations: acute aortic dissection / syndrome, intramural haematoma,
+    # penetrating aortic ulcer. Rescuing the full name but not the abbreviation would make the
+    # screen depend on how terse the department's protocol name is.
+    ("CT", "CT AORTIC ROOT AAD",                      ["aortic-dissection-detect"]),
+    ("CT", "CT AORTIC ROOT AAS PROTOCOL",             ["aortic-dissection-detect"]),
+    ("CT", "CT AORTIC ROOT IMH",                      ["aortic-dissection-detect"]),
+    ("CT", "CT AORTIC ROOT PAU",                      ["aortic-dissection-detect"]),
+    # the substrate acute aortic syndrome arises in, under each of its names
+    ("CT", "CT AORTIC ROOT ANEURYSM",                 ["aortic-dissection-detect"]),
+    ("CT", "CT AORTIC ROOT PSEUDOANEURYSM",           ["aortic-dissection-detect"]),
+    ("CT", "CT AORTIC ROOT ANEURYSMAL DILATATION",    ["aortic-dissection-detect"]),
+    ("CT", "CT AORTIC ROOT DILATATION",               ["aortic-dissection-detect"]),
+    ("CT", "CT AORTIC ROOT DILATED",                  ["aortic-dissection-detect"]),
+    ("CT", "CT AORTIC ROOT ECTASIA",                  ["aortic-dissection-detect"]),
+    ("CT", "CT ANNULOAORTIC ECTASIA AORTIC ROOT",     ["aortic-dissection-detect"]),
+    # trauma
+    ("CT", "CT AORTIC ROOT TRANSECTION",              ["aortic-dissection-detect"]),
+    ("CT", "CT AORTIC ROOT TRAUMA",                   ["aortic-dissection-detect"]),
+    ("CT", "CT AORTIC ROOT TRAUMATIC INJURY",         ["aortic-dissection-detect"]),
+    ("CT", "CT TRAUMA CHEST AORTIC ROOT",             [
+        "lung-nodule-detect", "pe-detect", "aortic-dissection-detect",
+    ]),
+    # infection and inflammation destroy the wall the same way
+    ("CT", "CT AORTIC ROOT ABSCESS",                  ["aortic-dissection-detect"]),
+    ("CT", "CT AORTIC ROOT ENDOCARDITIS",             ["aortic-dissection-detect"]),
+    ("CT", "CT AORTIC ROOT AORTITIS",                 ["aortic-dissection-detect"]),
+    ("CT", "CT AORTIC ROOT MYCOTIC ANEURYSM",         ["aortic-dissection-detect"]),
+    # THE ROOT IS THE SCAN RANGE, THE AORTA IS THE SUBJECT. Same trap as `head`: "aortic root"
+    # appearing anywhere is not evidence the study is about the root. These name a CTA's coverage,
+    # and the aorta they cover is exactly what the dissection screen exists for.
+    ("CT", "CTA AORTA AORTIC ROOT TO BIFURCATION",       ["aortic-dissection-detect"]),
+    ("CT", "CTA AORTA AORTIC ROOT TO ILIAC BIFURCATION", ["aortic-dissection-detect"]),
+    ("CT", "CTA THORACIC AORTA AORTIC ROOT",             ["aortic-dissection-detect"]),
+    ("CT", "CTA ABDOMINAL AORTA AORTIC ROOT",            ["aortic-dissection-detect"]),
+    ("CT", "CTA THORACOABDOMINAL AORTA AORTIC ROOT",     ["aortic-dissection-detect"]),
+    ("CT", "CTA ASCENDING AORTA AND AORTIC ROOT",        ["aortic-dissection-detect"]),
+    ("CT", "CT AORTIC ROOT AND DESCENDING AORTA",        ["aortic-dissection-detect"]),
+    ("CT", "CT ANGIO ENTIRE AORTA AORTIC ROOT",          ["aortic-dissection-detect"]),
+    ("CT", "CT ANGIO AORTA WITH RUNOFF AORTIC ROOT",     ["aortic-dissection-detect"]),
+    ("CT", "CT AORTOILIAC AORTIC ROOT TO ILIACS",        ["aortic-dissection-detect"]),
+    ("CT", "CTA AORTIC ROOT TO ARCH",                    ["aortic-dissection-detect"]),
+    ("CT", "CT ANGIO CHEST AORTIC ROOT AND ARCH",        [
+        "lung-nodule-detect", "pe-detect", "aortic-dissection-detect",
+    ]),
 ])
 def test_the_exclusions_do_not_cost_the_real_studies(modality, description, expected):
     """The exclusion refuses a region; it must not refuse the studies the region exists for."""
