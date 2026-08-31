@@ -135,7 +135,7 @@ a2a-client-it:
   image: python:3.11-slim
   script:
     - pip install -e "libs/radagent-common[a2a]" uvicorn pytest pytest-asyncio
-    - cd libs/radagent-common && python -m pytest tests/test_client.py -q
+    - cd libs/radagent-common && python -m pytest tests/test_client.py tests/test_push_roundtrip.py -q
 
 comms-roundtrip-it:
   # Issue #17 acceptance: an orchestrator dispatch round-trips against the LIVE Communications
@@ -209,6 +209,12 @@ ris-poller-tests:
   # below. A guard CI never runs is not a guard. test_negation.py (#78) is listed for the
   # same reason: 50 tests guarding the critical-finding scanners' negation window -- the
   # "never silence a pneumothorax" pins -- ran in NO lane before this line.
+  #
+  # THE LIST IS THE COVERAGE, and it drifted anyway. Five files (52 tests) arrived after that
+  # note and ran in NO lane at all -- the largest of them the OrthancStableStudyEvent pins, the
+  # contract that STARTS every workflow. Add a file to libs/radagent-common/tests and you add it
+  # HERE, or to a lane carrying the extras it needs: test_push_roundtrip.py imports uvicorn and
+  # starlette at module scope, so it lives in a2a-client-it and would ERROR at collection here.
   extends: .default-rules
   stage: test
   image: python:3.11-slim
@@ -241,6 +247,10 @@ ris-poller-tests:
       libs/radagent-common/tests/test_imaging.py
       libs/radagent-common/tests/test_tracing.py
       libs/radagent-common/tests/test_presign_concept_drift.py
+      libs/radagent-common/tests/test_correlation_ids.py
+      libs/radagent-common/tests/test_notification_overview_gp.py
+      libs/radagent-common/tests/test_orthanc_stable_event.py
+      libs/radagent-common/tests/test_worklist_client.py
       orchestrator/tests -q
 
 orchestrator-e2e-it:
