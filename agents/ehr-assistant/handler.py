@@ -36,7 +36,7 @@ from radagent_common.fhir_client import Fhir2Client
 
 _log = logging.getLogger(__name__)
 
-AGENT_VERSION = "0.2.0"
+AGENT_VERSION = "0.3.0"
 
 # --- LOINC panels ------------------------------------------------------------
 # eGFR is reported under several LOINCs depending on which equation the lab uses.
@@ -232,14 +232,23 @@ def _contrast_flags(labs: list[dict], allergies: list[dict], med_flags: dict) ->
 
 
 def _has_contrast_allergy(allergies: list[dict]) -> bool:
-    """Detect iodinated-contrast-media allergy. AllergyIntolerance code varies:
-    SNOMED (293637006 iodinated contrast media allergy) or free-text 'contrast' /
-    'iodine' in code/display."""
+    """Detect iodinated-contrast-media allergy across the shapes a real record takes: the SNOMED
+    concept 293637006, any OTHER coded concept whose display names contrast or iodine, and a
+    text-only allergy carrying no code at all.
+
+    The free-text half was unreachable before #135: the docstring said code/display, the code
+    read only `code`, and `_lean_allergy` emitted no `display` at all -- it discarded the second
+    half of `_first_coding_value`, which is where both a coding's display and a CodeableConcept's
+    free `text` live. So a text-only "Iodinated contrast media" arrived as {"code": ""} and only
+    that one exact SNOMED code could ever match. Now the projector keeps the display and this
+    scans both fields.
+    """
     for a in allergies:
         code = str(a.get("code") or "").lower()
-        if code in {"293637006"}:
+        if code == "293637006":
             return True
-        if "contrast" in code or "iodine" in code:
+        haystack = f"{code} {str(a.get('display') or '').lower()}"
+        if "contrast" in haystack or "iodine" in haystack:
             return True
     return False
 

@@ -887,10 +887,25 @@ def _lean_condition(resource: dict) -> dict:
 
 
 def _lean_allergy(resource: dict) -> dict:
-    """AllergyIntolerance -> {code, criticality}. `criticality` is a native FHIR field
-    (low | high | unable-to-assess); omitted if absent."""
-    code, _ = _first_coding_value(resource.get("code") or {})
+    """AllergyIntolerance -> {code, display, criticality}. `criticality` is a native FHIR field
+    (low | high | unable-to-assess); omitted if absent.
+
+    `display` is kept because dropping it lost the ONLY carrier of the substance for a large
+    class of real records (#135). `_first_coding_value` returns the coding's display when the
+    concept is coded and the CodeableConcept's free `text` when it is not -- so a text-only
+    allergy ("Iodinated contrast media", no coding) previously projected to `{"code": ""}` and
+    the substance was gone before any consumer could look. The contrast-allergy check could
+    then only ever match one exact SNOMED code.
+
+    This is a restoration of consistency, not a widening: `relevantLabs` and `activeProblems`
+    both already carry `display`, and allergies was the only coded slice that did not. A coding
+    display is terminology text, the same class those two carry, so the coded-only discipline
+    ("a code is a code") is unchanged.
+    """
+    code, display = _first_coding_value(resource.get("code") or {})
     out: dict = {"code": code or ""}
+    if display:
+        out["display"] = display
     criticality = resource.get("criticality")
     if criticality:
         out["criticality"] = criticality

@@ -62,7 +62,8 @@
         "type": "object",
         "additionalProperties": false,
         "required": ["code"],
-        "properties": { "code": { "type": "string" }, "criticality": { "type": "string" } }
+        "properties": { "code": { "type": "string" }, "display": { "type": "string" },
+                        "criticality": { "type": "string" } }
       }
     },
     "agentVersion": { "type": "string" },

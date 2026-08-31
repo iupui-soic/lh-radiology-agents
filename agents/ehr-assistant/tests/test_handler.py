@@ -304,3 +304,39 @@ async def test_unexpected_skill_rejected():
     import pytest
     with pytest.raises(ValueError):
         await handle("ehr.notAssemble", {"studyContext": SAMPLE_CONTEXT})
+
+
+# --- #135: contrast allergy across the shapes _lean_allergy actually emits --
+
+def test_contrast_allergy_is_detected_in_every_real_record_shape():
+    """Records are built the way `_lean_allergy` emits them, NOT the way a hand-written fixture
+    finds convenient. The old fixture put free text in `code` -- a shape the producer cannot
+    emit, since `code` is either a coding's code or "" -- so the free-text branch was exercised
+    by tests and unreachable in production (#135)."""
+    from handler import _has_contrast_allergy
+    assert _has_contrast_allergy([{"code": "293637006",
+                                   "display": "Iodinated contrast media allergy"}])
+    assert _has_contrast_allergy([{"code": "426232007", "display": "Allergy to contrast dye"}])
+    assert _has_contrast_allergy([{"code": "", "display": "Iodinated contrast media"}])
+    assert _has_contrast_allergy([{"code": "", "display": "IODINE allergy"}])
+
+
+def test_an_unrelated_allergy_does_not_flag_contrast():
+    from handler import _has_contrast_allergy
+    assert not _has_contrast_allergy([{"code": "91936005", "display": "Allergy to penicillin"}])
+    assert not _has_contrast_allergy([{"code": "", "display": "Peanut"}])
+    assert not _has_contrast_allergy([])
+
+
+async def test_an_allergy_display_survives_contract_validation(monkeypatch):
+    """Pins the CONTRACT half of #135. `allergies.items` is additionalProperties: false, so if
+    the schema loses `display` while the projector still emits it, every packet carrying a named
+    allergy fails validation in production while the unit tests stay green. Removing `display`
+    from contracts/skills/ehr.schema.json must break THIS test."""
+    _install(monkeypatch, FakeFhir2Client(
+        allergies=[{"code": "426232007", "display": "Allergy to contrast dye"}]))
+    out = await handle("ehr.assembleContext", {"studyContext": SAMPLE_CONTEXT})
+    validate_skill_output("ehr.assembleContext", out)   # raises ContractError on violation
+    assert out["allergies"] == [{"code": "426232007", "display": "Allergy to contrast dye"}]
+    assert out["contrastFlags"]["priorReaction"] is True, \
+        "a named contrast allergy must reach the contrast slice"
