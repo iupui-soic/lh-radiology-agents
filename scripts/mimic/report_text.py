@@ -16,6 +16,21 @@ FHIR2_CONCLUSION_MAX = 1024
 # (`<[^>]+>`) did exactly that whenever a later `>` existed in the sentence.
 _TAG = re.compile(r"</?[A-Za-z!][^>]*>")
 
+# The section whose LOSS is the #105 Class B defect. `conclusion` is the surface Verification
+# parses and the flip-to-final rehearsal cues on, and three cohort studies reached the host with
+# their impression gone -- head kept, tail dropped exactly at the header, whitespace collapsed.
+# Nothing in this repo produces that shape (clamp_conclusion keeps the TAIL and never fires
+# under the cap; strip_html deliberately never collapses runs), so the transform happened
+# RIS-side -- which is precisely why the writer that projects RIS text has to check.
+# CONCLUSION counts as an impression, the same fold report_body._SECTION_HEADERS applies.
+_IMPRESSION_HEADER = re.compile(r"(?i)\b(?:impression|conclusion)[ \t]*:")
+
+
+def has_impression(text: str) -> bool:
+    """True when the narrative carries an IMPRESSION (or CONCLUSION) header."""
+    return bool(_IMPRESSION_HEADER.search(text or ""))
+
+
 
 def strip_html(s: str) -> str:
     """Markup -> text, run to a FIXPOINT: strip tags, unescape entities, repeat until stable.
