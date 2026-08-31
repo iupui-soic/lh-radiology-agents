@@ -147,10 +147,33 @@ class TestModalitySignal:
         w, _ = _modality_signal({"modality": "CTA"})
         assert w == 10
 
-    def test_multi_modality_takes_first_token(self):
-        """`ModalitiesInStudy` may arrive as DICOM VR CS backslash-joined."""
+    def test_multi_modality_takes_the_highest_weight_token(self):
+        """#133. `ModalitiesInStudy` may arrive as DICOM VR CS backslash-joined, and DICOM
+        defines NO ordering for it, so the score must not depend on which token came first.
+
+        Uses modalities of DIFFERENT weights on purpose. The test this replaces used 'CT\\MR'
+        and CT and MR both weigh 5, so it passed whether the implementation took the first
+        token or the highest-weight one. It was named after a behaviour it never pinned, which
+        is why this drifted with no red test."""
+        for raw in ("CTA\\CR", "CR\\CTA"):
+            w, note = _modality_signal({"modality": raw})
+            assert w == 10, f"{raw} lost the CTA weight"
+            assert "CTA" in note, f"{raw} rationale must name the modality that scored"
+
+    def test_a_same_weight_list_keeps_the_first_token_in_the_rationale(self):
+        """Ties are not a judgement, so they stay stable: CT and MR both weigh 5 and the
+        rationale reports the one the source listed first rather than an arbitrary winner."""
         w, note = _modality_signal({"modality": "CT\\MR"})
         assert w == 5 and "CT" in note
+        w, note = _modality_signal({"modality": "MR\\CT"})
+        assert w == 5 and "MR" in note
+
+    def test_an_unknown_modality_does_not_beat_a_known_one(self):
+        """An unlisted modality weighs 0 by default, so it must never win over a scoring one
+        regardless of position."""
+        for raw in ("XA\\CT", "CT\\XA"):
+            w, note = _modality_signal({"modality": raw})
+            assert w == 5 and "CT" in note
 
     def test_missing_modality_neutral(self):
         w, note = _modality_signal({})
@@ -365,3 +388,25 @@ async def test_score_clamps_at_100_and_records_each_bonus():
     assert any("order priority=stat (+30)" in line for line in out["rationale"])
     assert any("modality=CT (+5)" in line for line in out["rationale"])
     assert any("reason I63.9" in line and "+25" in line for line in out["rationale"])
+
+
+async def test_modality_order_does_not_change_the_tier_through_the_handler():
+    """#133 end to end. The unit pin above proves the weight; this proves the thing that
+    actually reaches the worklist. A suspected PE scored 85/STAT as 'CTA\\CR' and 75/URGENT
+    as 'CR\\CTA', which is a tier flip on nothing but how the source serialised a DICOM
+    multi-valued attribute that has no defined order."""
+    results = []
+    for raw in ("CTA\\CR", "CR\\CTA"):
+        ctx = {
+            **SAMPLE_CONTEXT,
+            "study": {**SAMPLE_CONTEXT["study"], "modality": raw, "studyDescription": "",
+                      "numberOfInstances": 1},
+            "order": {"priority": "", "reasonCode": ["I26.99"]},
+        }
+        out = await handle("triage.score", {"studyContext": ctx})
+        validate_skill_output("triage.score", out)
+        results.append((out["priorityScore"], out["priorityTier"]))
+        assert any("modality=CTA" in line for line in out["rationale"]), (
+            f"{raw}: the rationale must name the modality the score came from")
+    assert results[0] == results[1], f"tier flipped on token order: {results}"
+    assert results[0][1] == "STAT"

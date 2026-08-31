@@ -25,7 +25,7 @@ from typing import Iterable
 
 from radagent_common.tracing import now_iso
 
-AGENT_VERSION = "0.2.0"
+AGENT_VERSION = "0.3.0"
 
 # ==============================================================================
 # Signal weight tables — kept explicit and short so a clinical reviewer can grep
@@ -172,12 +172,27 @@ def _reason_code_signals(order: dict) -> list[tuple[int, str]]:
 def _modality_signal(study: dict) -> tuple[int, str]:
     """`modality` may arrive as `ModalitiesInStudy` (e.g. 'CT\\MR' backslash-joined,
     per DICOM VR CS) or as the single-modality `Modality` tag. Split on both
-    DICOM ('\\\\') and CSV separators and take the first non-empty token."""
+    DICOM ('\\\\') and CSV separators and take the HIGHEST-WEIGHT token.
+
+    Highest-weight, not first (#133). DICOM defines no ordering for a multi-valued CS
+    attribute, so the same study reaches us as 'CTA\\CR' or 'CR\\CTA' depending on how the
+    source happened to serialise it. Taking the first token made the score depend on that
+    accident: a suspected PE scored 85/STAT one way and 75/URGENT the other, and 24 realistic
+    configurations flipped tier on token order alone.
+
+    A study that contains a CTA is a CTA study however the list is ordered, so the most acute
+    modality present wins. That is the direction every other signal in this file already leans,
+    and it is the only judgement in the change (PI, #133).
+
+    Ties keep the FIRST occurrence, so a same-weight list like 'CT\\MR' still reports CT and
+    the rationale stays stable rather than depending on dict iteration.
+    """
     raw = (study.get("modality") or "").upper()
-    tokens = re.split(r"[\\,]", raw)
-    modality = next((t.strip() for t in tokens if t.strip()), "")
-    if not modality:
+    tokens = [t.strip() for t in re.split(r"[\\,]", raw) if t.strip()]
+    if not tokens:
         return 0, "modality unknown"
+    # max() is stable on ties, so the first token of the winning weight is the one reported.
+    modality = max(tokens, key=lambda t: _MODALITY_WEIGHTS.get(t, 0))
     weight = _MODALITY_WEIGHTS.get(modality, 0)
     return weight, f"modality={modality} ({weight:+d})" if weight else f"modality={modality}"
 
