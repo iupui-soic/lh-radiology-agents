@@ -57,6 +57,27 @@ _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 # leaks were square. Same conservative bias as every other check in _parse_draft -- a false
 # reject costs the deterministic template, a false accept reaches a chart.
 _PLACEHOLDER = re.compile(r"\[[^\]]*\]")
+# A side the draft states. Checked against the text the draft was grounded in, never asserted
+# outright: post-sign the report conclusion usually DOES name a side, and that side may ride.
+_LATERALITY = re.compile(r"\b(?:left|right|bilateral|bilaterally)\b", re.I)
+# "left" and "right" also occur carrying NO anatomical claim at all -- "if left untreated",
+# "the drain should be left in place", "recommend a chest tube right away". These are ordinary
+# phrasing for exactly the recommendations this agent writes, and a bare word-anywhere scan
+# rejected every draft containing one, silently costing the LLM draft for a sentence that never
+# named a side. Stripped before the scan, on BOTH sides of the comparison -- an idiom in the
+# grounding must not ground a real side either, or the carve-out becomes a hole.
+#
+# Deliberately a short, closed list rather than a general rule: anything NOT listed still
+# rejects, which is the safe direction (a deterministic template, not a wrong side in a chart).
+_SIDE_IDIOM = re.compile(
+    r"\bleft\s+(?:untreated|alone|unchanged|open|undrained|in\s+(?:place|situ))\b"
+    r"|\bright\s+away\b", re.I)
+
+
+def _sides_stated_in(text: str) -> set[str]:
+    """The sides `text` actually asserts, idioms removed. "bilaterally" folds onto "bilateral"."""
+    return {m.group(0).lower().rstrip("ly")
+            for m in _LATERALITY.finditer(_SIDE_IDIOM.sub(" ", text))}
 
 
 def _is_plaintext_remote(base_url: str) -> bool:
@@ -167,14 +188,30 @@ def _summarize_ehr_context(ehr_context: dict) -> str:
     falls back to the CodeableConcept's free `text` for the display when no coding carries a
     code, so an UNCODED entry's display can be clinician-typed narrative -- which must not ride
     to an external endpoint ("a code is a code", the `_order_reason_codes` rule). When a code IS
-    present the display is the coding's own terminology display, so it may travel."""
+    present the display is the coding's own terminology display, so it may travel.
+
+    NAMED entries only, which is the other half and was learned the hard way. A code with no
+    display used to fall back to the bare code, so the prompt said "Active problems: E11.9,
+    M17.11" -- and a model asked for clinical prose does the only thing it can with that: it
+    invents a name. Measured over the 25 CAD-positive cohort studies on the deployed model, 5 of
+    25 drafts printed a raw ICD code into the impression and 2 attached an invented diagnosis to
+    one: a haematological code came back as a liver laceration and a head-injury code as an
+    unspecified abdominal injury. Dropping the unnamed entries took both to 0 of 25. This is
+    not a model quirk and no model can do better: the name is simply not in the data, so ANY
+    name is invented. It reached the prompt because the cohort ETL provisions
+    problems from ICD-10 codes without display text (0 of 300 carry one), and this is a pre-sign
+    path, so an invented comorbidity lands in a chart. The measured examples are deliberately
+    described rather than quoted: a cohort subject's code list is patient data. Dropping a
+    comorbidity costs an impression some context; inventing one puts a wrong diagnosis in front
+    of a radiologist."""
     problems = ", ".join(
-        p.get("display") or p["code"]
-        for p in ehr_context.get("activeProblems", []) if p and p.get("code")
+        p["display"] for p in ehr_context.get("activeProblems", [])
+        if p and p.get("code") and p.get("display")
     )
     labs = ", ".join(
-        f"{lab.get('display') or lab['code']}: {lab.get('value', '')} {lab.get('unit', '')}".strip()
+        f"{lab['display']}: {lab.get('value', '')} {lab.get('unit', '')}".strip()
         for lab in ehr_context.get("relevantLabs", []) if lab and lab.get("code")
+        and lab.get("display")
     )
     parts = []
     if problems:
@@ -213,7 +250,29 @@ _SYSTEM_PROMPT = (
     # (golden rule 2), so there is nothing to fill in and nothing to leave a blank for.
     "Never write a bracketed placeholder such as [patient name], [insert context] or [date]. "
     "You have no patient identifiers and need none: state only what the text above supports, "
-    "and leave a detail out entirely rather than marking a blank to be filled in later."
+    "and leave a detail out entirely rather than marking a blank to be filled in later. "
+    # The three fabrications a pre-sign draft cannot carry, each measured on the deployed model
+    # over the 25 CAD-positive cohort studies before this clause existed. They are listed
+    # literally because the model does not invent at random: it fills the shapes a radiology
+    # impression usually has -- an indication, an examination, a side -- and none of those
+    # shapes is supplied here. A pre-sign draft has NO report, so there is even less to ground
+    # it than the post-sign case, and it is the one that reaches the chart.
+    #
+    # 1. Symptoms and history: 9 of 25 wrote a presentation nobody supplied ("respiratory
+    #    symptoms consistent with pneumothorax, including shortness of breath and chest pain").
+    # 2. Confirmation: 24 of 25 called the screen "confirmed", and several named a source for
+    #    it ("as confirmed by both the clinical examination and radiographic evidence"). The
+    #    word comes from this prompt's own "Confirmed ... findings" labels, which exist so the
+    #    model cannot negate a finding (#76 rehearsal) and are staying -- so the meaning has to
+    #    be pinned instead of the word removed.
+    # 3. Laterality: a side appeared on studies whose classifier has no laterality head at all,
+    #    so left/right can only ever be a guess here.
+    "State ONLY what the supplied text supports. Specifically: do not describe symptoms, a "
+    "presentation, a clinical history or a physical examination -- none is given to you. Do not "
+    "write that a finding was confirmed by an examination, by a clinician, or by anything other "
+    "than the automated screening itself; where a finding is marked confirmed above, that means "
+    "a screening tool reported it, not that it has been clinically verified. Do not state a "
+    "side (left, right, bilateral) unless the text above states it."
 )
 
 
@@ -304,7 +363,7 @@ def _first_json_object(text: str) -> str:
 
 
 def _parse_draft(content: str, critical_flags: list[dict],
-                 finding_terms: list[str] | None = None) -> LLMDraft:
+                 finding_terms: list[str] | None = None, grounding: str = "") -> LLMDraft:
     """Raises on anything unusable; draft_impression() turns every raise into a None."""
     parsed = json.loads(_first_json_object(content.strip()))
     impression_text = parsed["impressionText"]
@@ -326,6 +385,25 @@ def _parse_draft(content: str, critical_flags: list[dict],
         # Reason only, never the matched text: a placeholder sits INSIDE cohort-derived prose,
         # and this string is logged (see the module docstring's logging discipline).
         raise ValueError("unfilled placeholder in the drafted prose")
+    # A SIDE the source text never gave. The prompt asks for this too, and asking was not enough:
+    # measured on the deployed model over the 25 CAD-positive cohort studies, 3 of 25 pre-sign
+    # drafts still wrote "A pneumothorax is present in the right lung" with no report, no side in
+    # the context, and a classifier that has no laterality head to produce one. The rate went UP
+    # as the prompt got cleaner, because the model fills the shapes an impression usually has and
+    # a side is one of them. Same lesson as _PLACEHOLDER (#117/!159): a prompt clause is a
+    # request, a parser reject is a guard, and the ones that matter get both.
+    #
+    # Grounded sides ride: post-sign the report conclusion routinely names one, and this rejects
+    # only a side that appears in NEITHER the conclusion nor the context the model was given.
+    # Conservative as ever -- a reject costs the deterministic template, which never states a
+    # side it was not given.
+    stated_sides = _sides_stated_in(impression_text)
+    for recommendation in recommendations:
+        stated_sides |= _sides_stated_in(recommendation)
+    if stated_sides:
+        if stated_sides - _sides_stated_in(grounding):
+            # Reason only, never the prose: the same logging discipline as the placeholder reject.
+            raise ValueError("prose states a side the source text does not")
     # An EMPTY list is legitimate and must stay that way (#103). A normal study warrants no
     # recommendation, the model says so by returning [], and requiring one here threw away the
     # draft for most of a screening cohort -- silently, since the fallback is by design. Where a
@@ -437,7 +515,7 @@ async def draft_impression(
         )
         content = await _chat_completion(base_url, model, api_key, timeout, prompt)
         try:
-            return _parse_draft(content, critical_flags, finding_terms)
+            return _parse_draft(content, critical_flags, finding_terms, grounding=prompt)
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as first:
             # One retry, and only for a reply we could not use (#103). The model answered, so the
             # endpoint and the key are fine; it emitted a raw newline or an unescaped quote inside
@@ -452,7 +530,7 @@ async def draft_impression(
             _log.warning("impression LLM draft malformed: %s: %s; retrying once",
                          first.__class__.__name__, first)
             content = await _chat_completion(base_url, model, api_key, timeout, prompt)
-            return _parse_draft(content, critical_flags, finding_terms)
+            return _parse_draft(content, critical_flags, finding_terms, grounding=prompt)
     except (httpx.InvalidURL, httpx.UnsupportedProtocol) as e:
         _log.warning("impression LLM draft skipped: unusable IMPRESSION_LLM_BASE_URL (%s)", e.__class__.__name__)
     except httpx.HTTPStatusError as e:

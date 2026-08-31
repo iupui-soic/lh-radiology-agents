@@ -334,16 +334,18 @@ async def test_prose_must_assert_every_confirmed_flag(monkeypatch):
     two_flags = [{"label": "pneumothorax", "severity": "critical"},
                  {"label": "aortic dissection", "severity": "critical"}]
 
+    # conclusion carries the side, so the laterality reject is not what is being measured here
+    grounded = "Large right-sided pneumothorax."
     transport, _ = _responding(content=_draft_json("Large pneumothorax on the right."))
     _install(monkeypatch, transport)
-    out = await draft_impression(conclusion="", finding_labels="",
+    out = await draft_impression(conclusion=grounded, finding_labels="",
                                  critical_flags=two_flags, ehr_context={})
     assert out is None
 
     transport2, _ = _responding(content=_draft_json(
         "Large pneumothorax on the right. Findings concerning for aortic dissection."))
     _install(monkeypatch, transport2)
-    out2 = await draft_impression(conclusion="", finding_labels="",
+    out2 = await draft_impression(conclusion=grounded, finding_labels="",
                                   critical_flags=two_flags, ehr_context={})
     assert isinstance(out2, LLMDraft)
 
@@ -417,6 +419,165 @@ async def test_uncoded_ehr_entries_never_reach_the_prompt(monkeypatch):
     assert "free-text lab comment" not in outbound
 
 
+async def test_a_code_with_no_display_never_reaches_the_prompt(monkeypatch):
+    """The other half of the coded/uncoded rule. A code WITHOUT a display used to fall back to
+    the bare code, so the prompt read "Active problems: E11.9" -- and a model asked for clinical
+    prose invents a name for it, because the name is not in the data for any model to find. On
+    the deployed model that put an invented liver laceration and an invented abdominal injury
+    into a pre-sign draft -- one from a haematological code, one from a head-injury code -- and
+    a pre-sign draft is a chart-bound path. Dropping the entry costs context; keeping it puts an
+    invented diagnosis in front of a radiologist. (Codes below are illustrative, not the ones
+    measured on: cohort codes are patient data and do not belong in a fixture.)"""
+    _clear(monkeypatch)
+    _configure(monkeypatch)
+    transport, seen = _responding(content=_draft_json("Clear lungs."))
+    _install(monkeypatch, transport)
+    await draft_impression(
+        conclusion="", finding_labels="", critical_flags=[],
+        ehr_context={
+            "activeProblems": [
+                {"code": "J45.909", "display": "Asthma"},
+                {"code": "E11.9"},
+                {"code": "M17.11", "display": ""},
+            ],
+            "relevantLabs": [
+                {"code": "2160-0", "display": "Creatinine", "value": 1.1, "unit": "mg/dL"},
+                {"code": "1975-2", "value": 0.4, "unit": "mg/dL"},
+            ],
+        })
+    (request,) = seen
+    outbound = _json.dumps(request["body"])
+    assert "Asthma" in outbound and "Creatinine" in outbound
+    assert "E11.9" not in outbound
+    assert "M17.11" not in outbound
+    assert "1975-2" not in outbound
+
+
+async def test_the_prompt_forbids_the_three_pre_sign_fabrications(monkeypatch):
+    """A pre-sign draft carries no report, so the model has even less to ground it than the
+    post-sign case -- and it fills the shapes an impression usually has. Measured on the
+    deployed model over the 25 CAD-positive cohort studies: 9/25 invented symptoms or an
+    examination, 24/25 called the screen "confirmed" (several naming a clinical source for it),
+    and a side appeared on studies whose classifier has no laterality head. Each clause is
+    pinned here so it cannot be dropped as prompt clutter."""
+    _clear(monkeypatch)
+    _configure(monkeypatch)
+    transport, seen = _responding(content=_draft_json("Pneumothorax.", ["Urgent review."]))
+    _install(monkeypatch, transport)
+    await draft_impression(conclusion="", finding_labels="Pneumothorax",
+                           critical_flags=CRITICAL_FLAGS, ehr_context={})
+    (request,) = seen
+    system = "".join(m["content"] for m in request["body"]["messages"]
+                     if m["role"] == "system").lower()
+    # 1. no invented presentation
+    assert "do not describe symptoms" in system
+    assert "physical examination" in system
+    # 2. "confirmed" means a screening tool reported it, not that a clinician verified it
+    assert "confirmed by an examination" in system
+    assert "not that it has been clinically verified" in system
+    # 3. no guessed side
+    assert "do not state a side" in system
+
+
+async def test_a_side_the_source_text_never_gave_is_rejected(monkeypatch):
+    """The prompt asks for this and asking was not enough: on the deployed model 3 of 25
+    pre-sign drafts still wrote "A pneumothorax is present in the right lung" with no report,
+    no side in the context, and a classifier that has no laterality head to produce one. Same
+    lesson as the placeholder reject (#117/!159) -- a prompt clause is a request, a parser
+    reject is a guard. Falls back to the deterministic template, which never states a side it
+    was not given."""
+    _clear(monkeypatch)
+    _configure(monkeypatch)
+    transport, _ = _responding(content=_draft_json(
+        "A pneumothorax is present in the right lung.", ["Urgent clinical correlation."]))
+    _install(monkeypatch, transport)
+    out = await draft_impression(conclusion="", finding_labels="Pneumothorax",
+                                 critical_flags=CRITICAL_FLAGS, ehr_context={})
+    assert out is None
+
+
+async def test_a_side_stated_only_in_a_recommendation_is_rejected(monkeypatch):
+    """Recommendations are scanned too, not just the impression -- "Chest tube to the right
+    side" is the same invention one field over, and the recommendations are what a reader is
+    meant to act on. Exactly the reason the placeholder reject scans both."""
+    _clear(monkeypatch)
+    _configure(monkeypatch)
+    transport, _ = _responding(content=_draft_json(
+        "A pneumothorax is present.", ["Consider chest tube placement on the right."]))
+    _install(monkeypatch, transport)
+    out = await draft_impression(conclusion="", finding_labels="Pneumothorax",
+                                 critical_flags=CRITICAL_FLAGS, ehr_context={})
+    assert out is None
+
+
+async def test_a_side_the_report_gave_rides(monkeypatch):
+    """The mirror, and the reason the check is grounded rather than absolute: post-sign the
+    report conclusion routinely names a side, and a draft that repeats it is correct. Rejecting
+    that would cost the deterministic template on most real post-sign drafts."""
+    _clear(monkeypatch)
+    _configure(monkeypatch)
+    transport, _ = _responding(content=_draft_json(
+        "A pneumothorax is present in the right lung.", ["Urgent clinical correlation."]))
+    _install(monkeypatch, transport)
+    out = await draft_impression(conclusion="Moderate right apical pneumothorax.",
+                                 finding_labels="Pneumothorax",
+                                 critical_flags=CRITICAL_FLAGS, ehr_context={})
+    assert isinstance(out, LLMDraft)
+    assert out.impression_text == "A pneumothorax is present in the right lung."
+
+
+async def test_a_side_grounded_only_in_the_ehr_context_rides(monkeypatch):
+    """Grounding is the whole prompt, not just the conclusion: a side named in the EHR context
+    is text the model was given, so repeating it is not invention. Pins that the check reads the
+    context too, which is what makes it safe to apply pre-sign where there IS no conclusion."""
+    _clear(monkeypatch)
+    _configure(monkeypatch)
+    transport, _ = _responding(content=_draft_json(
+        "Left-sided pleural effusion.", []))
+    _install(monkeypatch, transport)
+    out = await draft_impression(
+        conclusion="", finding_labels=[EFFUSION_LABEL], critical_flags=[],
+        ehr_context={"activeProblems": [
+            {"code": "K21.9", "display": "Left-sided pleural effusion"}]})
+    assert isinstance(out, LLMDraft)
+
+
+async def test_an_idiomatic_left_or_right_is_not_a_stated_side(monkeypatch):
+    """"If left untreated" and "right away" are ordinary phrasing for exactly the recommendations
+    this agent writes, and neither claims a side. A word-anywhere scan rejected every draft
+    carrying one -- silently, since the fallback is by design -- so the guard cost the LLM path
+    drafts that had invented nothing. Stripped before the scan; anything NOT on that short list
+    still rejects, which keeps the safe direction."""
+    _clear(monkeypatch)
+    _configure(monkeypatch)
+    transport, _ = _responding(content=_draft_json(
+        "A pneumothorax is present.",
+        ["If left untreated, a tension pneumothorax may develop.",
+         "Recommend chest tube placement right away.",
+         "Any existing drain should be left in place."]))
+    _install(monkeypatch, transport)
+    out = await draft_impression(conclusion="", finding_labels="Pneumothorax",
+                                 critical_flags=CRITICAL_FLAGS, ehr_context={})
+    assert isinstance(out, LLMDraft)
+
+
+async def test_an_idiom_in_the_grounding_does_not_ground_a_real_side(monkeypatch):
+    """The carve-out is applied to BOTH sides of the comparison. If idioms were stripped only
+    from the draft, a conclusion reading "if left untreated" would ground the word "left" and
+    license a fabricated left-sided finding -- the carve-out would become the hole. Here the
+    only "left" in the source text is idiomatic, so the draft's anatomical left is still an
+    invention and is still rejected."""
+    _clear(monkeypatch)
+    _configure(monkeypatch)
+    transport, _ = _responding(content=_draft_json(
+        "A pneumothorax is present in the left apex.", []))
+    _install(monkeypatch, transport)
+    out = await draft_impression(
+        conclusion="Pneumothorax. If left untreated this may enlarge.",
+        finding_labels="Pneumothorax", critical_flags=CRITICAL_FLAGS, ehr_context={})
+    assert out is None
+
+
 async def test_json_fence_wrapped_response_is_accepted(monkeypatch):
     """response_format support varies across OpenAI-compatible backends; a fenced-but-valid
     draft must parse rather than fall back."""
@@ -425,9 +586,11 @@ async def test_json_fence_wrapped_response_is_accepted(monkeypatch):
     fenced = "```json\n" + _draft_json("Large pneumothorax on the right.") + "\n```"
     transport, _ = _responding(content=fenced)
     _install(monkeypatch, transport)
-    out = await draft_impression(conclusion="", finding_labels="",
-                                 critical_flags=CRITICAL_FLAGS, ehr_context={})
+    out = await draft_impression(conclusion="Large right-sided pneumothorax.",
+                                 finding_labels="", critical_flags=CRITICAL_FLAGS,
+                                 ehr_context={})
     assert isinstance(out, LLMDraft)
+    # doubles as the allow-path for the laterality reject: the conclusion names the side
     assert out.impression_text == "Large pneumothorax on the right."
 
 
@@ -655,7 +818,10 @@ async def test_prose_asserting_the_confirmed_effusion_is_accepted(monkeypatch):
     transport, _ = _responding(content=_draft_json(
         "Small left pleural effusion. Clinical correlation recommended."))
     _install(monkeypatch, transport)
-    out = await draft_impression(conclusion="", finding_labels=[EFFUSION_LABEL],
+    # the conclusion names the side, so this stays a test of the assertion rule rather than of
+    # the laterality reject
+    out = await draft_impression(conclusion="Small left pleural effusion.",
+                                 finding_labels=[EFFUSION_LABEL],
                                  critical_flags=[], ehr_context={})
     assert out == LLMDraft(
         impression_text="Small left pleural effusion. Clinical correlation recommended.",
@@ -702,7 +868,7 @@ async def test_the_prompt_names_confirmed_findings_as_authoritative(monkeypatch)
     the model goes back to inferring normality and these tests still pass on canned replies."""
     _clear(monkeypatch)
     _configure(monkeypatch)
-    transport, seen = _responding(content=_draft_json("Small left pleural effusion."))
+    transport, seen = _responding(content=_draft_json("Small pleural effusion."))
     _install(monkeypatch, transport)
     await draft_impression(conclusion="", finding_labels=[EFFUSION_LABEL],
                            critical_flags=[], ehr_context={})

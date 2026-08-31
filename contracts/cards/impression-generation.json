@@ -2,7 +2,7 @@
   "name": "Impression Generation Agent",
   "description": "Produces a structured impression draft from findings, AI output and priors. Timing-agnostic (post-sign safety-net in v1).",
   "url": "http://impression-generation:8104/",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "capabilities": { "streaming": true, "pushNotifications": true },
   "defaultInputModes": ["application/json"],
   "defaultOutputModes": ["application/json"],
