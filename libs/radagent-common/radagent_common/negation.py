@@ -290,6 +290,15 @@ _HEADER_RE = re.compile(r"(?i)\b(" + "|".join(re.escape(h) for h in _ALL_HEADERS
 _SUB_HEADER_RE = re.compile(r"(?m)^[ \t]*([A-Z][A-Za-z /-]{1,30}?)" + _HEADER_SEP)
 
 
+# A sentence terminator must be FOLLOWED BY WHITESPACE (or end the text). A bare [.;] also
+# matches inside a decimal or an abbreviation, and since a skip section commonly carries a
+# date ("COMPARISON: CT 1.5.2026 demonstrated a large right pneumothorax, since resolved"),
+# clamping at that first dot leaks the rest of the section back into the scan and raises a
+# false critical off a resolved prior. Over-flag is the safe direction here, but it is
+# avoidable, so avoid it (PI, on !190).
+_SENTENCE_END = re.compile(r"[.;](?=\s|$)")
+
+
 def _clamped_skip_end(text: str, body_start: int, hard_end: int) -> int:
     """Where a skipped section's PROVABLE content ends: its header line plus hard-wrap
     continuations.
@@ -318,7 +327,10 @@ def _clamped_skip_end(text: str, body_start: int, hard_end: int) -> int:
         but a real false page, not a harmless leak.
     """
     lines = text[body_start:hard_end].split("\n")
-    end_offset = len(lines[0])
+    first_end = _SENTENCE_END.search(lines[0])
+    end_offset = first_end.end() if first_end else len(lines[0])
+    if first_end:
+        return body_start + end_offset
     prev = lines[0]
     for line in lines[1:]:
         if not line.strip() or prev.rstrip().endswith((".", ";")):
