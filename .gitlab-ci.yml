@@ -48,6 +48,30 @@ validate-contracts:
     - pip install jsonschema pyyaml
     - python scripts/validate_contracts.py
 
+agent-version-bumps:
+  # The #129 gate. #124 stopped the card and the handler DISAGREEING; its own comment in
+  # validate_contracts.py records what it cannot do -- "it cannot catch both being stale
+  # together ... when to bump is a discipline no gate here enforces". This is that gate.
+  #
+  # MR pipelines ONLY, and not by preference: whether behaviour changed is a fact about a
+  # CHANGE, so it needs a base ref. On the default branch there is nothing to compare against.
+  #
+  # GIT_DEPTH 0 because the default shallow clone can cut above the merge base, and the
+  # real-history tests walk back further still; git itself is installed because the script and
+  # the tests shell out to it, and python:3.11-slim carries no git (the runner's clone uses the
+  # helper image, not this one).
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+  stage: validate
+  image: python:3.11-slim
+  variables:
+    GIT_DEPTH: 0
+  script:
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends git
+    - pip install pytest
+    - python -m pytest scripts/tests -q
+    - python scripts/check_agent_version_bumps.py "$CI_MERGE_REQUEST_DIFF_BASE_SHA"
+
 agent-tests:
   extends: .default-rules
   stage: test
