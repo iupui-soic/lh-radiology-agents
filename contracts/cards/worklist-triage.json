@@ -2,7 +2,7 @@
   "name": "Worklist Triage Agent",
   "description": "Assigns a reading-priority tier to a completed study from order context and imaging signals.",
   "url": "http://worklist-triage:8101/",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "capabilities": { "streaming": true, "pushNotifications": true },
   "defaultInputModes": ["application/json"],
   "defaultOutputModes": ["application/json"],
