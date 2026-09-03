@@ -70,7 +70,7 @@ services:
     #   REMINDER, this bump recreates `openmrs`: rebuild the Lucene index afterwards (delete the
     #   `search.indexVersion` global property and restart) or every RIS name/identifier search
     #   silently returns nothing. See the run-book's §6 note.
-    # * o3-074c9b8d (lh-radiology!97 + !98, #120 + #115): the claim URL
+    # * o3-31e7000a (lh-radiology!97 + !98 + !99, #120 + #115): the claim URL
     #   `radiologyReport.form?orderId=` lands on the report an order already has (the AI pre-sign
     #   draft, or a radiologist's) instead of throwing `cannot.create.already.claimed`, and the
     #   Reports tab lists drafts: a draft has no report date, and the tab's date filter used to
@@ -78,7 +78,13 @@ services:
     #   The omod also ships its own vendor assets now, so the Caddy and OHIF vendor workarounds
     #   are redundant on this pin and can be retired once it is deployed. Same recreate and
     #   Lucene reminder as above.
-    image: registry.gitlab.com/librehealth/radiology/lh-radiology/o3:o3-074c9b8d
+    #   Its predecessor `o3-074c9b8d` carried the same two omod fixes and could not boot: the
+    #   sibling Dockerfile's base tag `3.7.x` had moved on Docker Hub (core 2.8.10-SNAPSHOT), the
+    #   bundled appointments module's liquibase failure then cancelled the module context refresh,
+    #   and the demo host served `/openmrs/` with no REST, fhir2 or radiology handlers until it was
+    #   rolled back (2026-09-03). lh-radiology!99 pins the base by digest. RULE since then: a pin
+    #   bump waits for `scripts/o3_boot_test.sh` against the exact tag (run-book 6a).
+    image: registry.gitlab.com/librehealth/radiology/lh-radiology/o3:o3-31e7000a
     pull_policy: missing                  # `up` pulls the published image; build only on `compose build`
     build:
       context: ../lh-radiology            # sibling checkout of lh-radiology (o3 branch)

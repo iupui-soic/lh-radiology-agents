@@ -16,7 +16,7 @@ origin the #75 Caddy overlay serves. Nothing else is reachable off-box.
 | Viewer (reading mode) | `https://demo.example.org/read?...` — reached ONLY by clicking a worklist row | same origin, same login |
 | RIS / OpenMRS login | `https://demo.example.org/openmrs/login.htm` | radiologist's own OpenMRS account |
 | RIS order page (read-only) | `https://demo.example.org/openmrs/module/radiology/radiologyOrder.form?orderId=<uuid>` — reached via the viewer's **Report this study** action. Shows the order only: despite what this row used to claim, the pre-sign draft is **not** rendered here (verified 2026-08-20), so arc 2's "look, the AI already drafted" beat has to happen on the report form. It carries **no claim button** on this build (#109), and its "View Study" link points at a `localhost:8081` Weasis URL that is dead from any reviewer's browser: ignore it, the viewer is the `/read` route | OpenMRS session |
-| RIS report form (claim, author, sign) | `…/radiologyReport.form?orderId=<uuid>` **is the claim**, and since o3 pin `o3-074c9b8d` (#120) it is safe on every study: with no report yet it creates the draft and redirects to `?reportId=<n>`; with one already there (the AI pre-sign draft on ~45 of the cohort, or a radiologist's own) it lands on that report instead of the `cannot.create.already.claimed` crash page. Radiology → Reports lists every draft too (interpreter column blank until claimed; a draft has no report date, so the date filter never hides one), and each row's eye icon opens the form. Verify both before the session, see §1.7 | OpenMRS session |
+| RIS report form (claim, author, sign) | `…/radiologyReport.form?orderId=<uuid>` **is the claim**, and since o3 pin `o3-31e7000a` (#120) it is safe on every study: with no report yet it creates the draft and redirects to `?reportId=<n>`; with one already there (the AI pre-sign draft on ~45 of the cohort, or a radiologist's own) it lands on that report instead of the `cannot.create.already.claimed` crash page. Radiology → Reports lists every draft too (interpreter column blank until claimed; a draft has no report date, so the date filter never hides one), and each row's eye icon opens the form. Verify both before the session, see §1.7 | OpenMRS session |
 | Patient chart (referring MD) | `https://demo.example.org/openmrs` → find patient → chart shows the **AI critical result notification** entry | physician's own OpenMRS account |
 | Critical-result ack (phone) | `https://demo.example.org/openmrs/ack/<taskId>?sig=…` — the signed link inside the chart notification. Under `/openmrs` since #126, which is what lets it reuse the physician's session; links minted before that carry `/reading-api/ack/…` and still work, on the Basic path | physician's OpenMRS account (live session, else an HTTP Basic prompt) |
 | Sign-off override (phone) | `https://demo.example.org/ingress/signoff/<workflowId>/override` — the link inside the escalation page | `SIGNOFF_OVERRIDE_TOKEN` |
@@ -85,7 +85,8 @@ origin the #75 Caddy overlay serves. Nothing else is reachable off-box.
    dead. If a form looks broken on a local stack, check which port you are on before anything
    else. The #75 overlay's Caddy handle still serves them for the hosted showcase, where
    everything is already same-origin behind Caddy.
-   The real fix is the o3 omod build shipping `src/main/webapp/resources/vendor/**`, still open on #115.
+   Since o3 pin `o3-31e7000a` the omod ships `src/main/webapp/resources/vendor/**` itself (#115,
+   lh-radiology!98), so on that pin both handles are redundant; retiring them is a follow-up.
 5b. `ris-sign-bridge` is up (`docker compose ps ris-sign-bridge`): the module's sign emit is
    broken (ServiceNotFoundException, swallowed), so without the bridge a signed report never
    reaches fhir2/the poller and every read parks at the gate (workaround for #70; real fix o3).
@@ -113,7 +114,7 @@ origin the #75 Caddy overlay serves. Nothing else is reachable off-box.
 7. **Check the AI drafts are reachable from the RIS.** Radiology → Reports, status filter
    **DRAFT**: the AI pre-sign drafts are listed with the interpreter column blank (unclaimed),
    and each row's eye icon opens `radiologyReport.form?reportId=<n>`. The `?orderId=` claim URL
-   lands on the same draft. Both are the #120 fix, in the o3 image since `o3-074c9b8d`. The
+   lands on the same draft. Both are the #120 fix, in the o3 image since `o3-31e7000a`. The
    list used to show 0 of 0 because a draft has no report date and the tab's default date range
    (last week) excluded it, not because of the NULL interpreter the issue first blamed. On an
    older pin the list is empty and the claim URL throws, so the ids have to come from the
@@ -392,6 +393,28 @@ boot and built 50 demo patients before the server would answer (#101); if a recr
 taking twenty minutes, the pin predates that fix. `docker compose ... pull openmrs` first so the
 image is local and the outage is just the boot, and take a DB dump before the recreate
 (`scripts/dump_openmrs_seed.sh ~/backups/openmrs-predeploy-<date>.sql.gz`).
+
+**Boot-test the exact tag before the recreate.** Added after 2026-09-03, when `o3-074c9b8d`
+(built on a base tag that had moved on Docker Hub) deployed as a bare core: Tomcat answered
+`/openmrs/` 200 while REST, fhir2 and the radiology module had no handlers, and the host was
+rolled back after 13 minutes. `docker-build` and the unit tests were green; nothing had booted
+the image. On the host, after the dump above:
+
+```bash
+scripts/o3_boot_test.sh registry.gitlab.com/librehealth/radiology/lh-radiology/o3:o3-<sha> \
+    ~/backups/openmrs-predeploy-<date>.sql.gz
+```
+
+It starts a scratch MariaDB from the live `mariadb` image on its own network, loads the dump,
+removes `search.indexVersion` so the Lucene rebuild runs too, boots the tag with the live
+container's `OMRS_*` environment pointed at the scratch database, and waits for `session` 200
+(about 3 minutes). It then prints the four things that matter: `cancelling refresh` and
+`Context.shutdown` counts (any non-zero means startup aborted, whatever `/openmrs/` says), the
+core jar version, and the handler probes (`ws/rest/v1/session`, `ws/fhir2/R4/metadata`,
+`module/radiology/radiologyReport.form`, and the vendor assets under
+`moduleResources/radiology/vendor/`). The `appointments` module logs one liquibase failure on
+every pin so far and is tolerated by core 2.8.7; anything else in the module-error line is new.
+Remove the scratch pair afterwards (`docker rm -f o3test o3test-db; docker network rm o3test-net`).
 
 ## 7. Recording plan
 
