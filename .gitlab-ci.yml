@@ -89,13 +89,19 @@ worklist-api-tests:
   # ohif-extension lane covers only the extension's vitest; agent-tests loops agents/*/ only).
   # Same rationale as the ris-poller explicit list: a guard CI never runs is not a guard.
   #
-  # WORKLIST_STORE_PATH: main.py builds the app at import time with a /var/lib default, so
-  # collection itself needs a writable path -- true for any environment that runs this suite.
+  # WORKLIST_STORE_PATH and WORKLIST_FINDINGS_STORE_PATH: main.py builds the app at import time
+  # and BOTH of its sqlite stores default under /var/lib, so collection itself needs two writable
+  # paths -- true for any environment that runs this suite. This lane used to set only the first
+  # and stayed green because the container runs as root and can create /var/lib/lhrad; a normal
+  # user hit a PermissionError at collection instead (#134). tests/conftest.py now defaults both
+  # to a temp dir when unset, so these are belt-and-braces: explicit here so the lane does not
+  # depend on the conftest, and so the next store added to main.py is named in the same place.
   extends: .default-rules
   stage: test
   image: python:3.11-slim
   variables:
     WORKLIST_STORE_PATH: /tmp/worklist-tests.sqlite
+    WORKLIST_FINDINGS_STORE_PATH: /tmp/worklist-findings-tests.sqlite
   script:
     - pip install -e libs/radagent-common pytest pytest-asyncio fastapi httpx
     - cd integrations/worklist-api && python -m pytest -q
