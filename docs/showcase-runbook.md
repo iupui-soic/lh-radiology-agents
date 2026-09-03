@@ -16,7 +16,7 @@ origin the #75 Caddy overlay serves. Nothing else is reachable off-box.
 | Viewer (reading mode) | `https://demo.example.org/read?...` — reached ONLY by clicking a worklist row | same origin, same login |
 | RIS / OpenMRS login | `https://demo.example.org/openmrs/login.htm` | radiologist's own OpenMRS account |
 | RIS order page (read-only) | `https://demo.example.org/openmrs/module/radiology/radiologyOrder.form?orderId=<uuid>` — reached via the viewer's **Report this study** action. Shows the order only: despite what this row used to claim, the pre-sign draft is **not** rendered here (verified 2026-08-20), so arc 2's "look, the AI already drafted" beat has to happen on the report form. It carries **no claim button** on this build (#109), and its "View Study" link points at a `localhost:8081` Weasis URL that is dead from any reviewer's browser: ignore it, the viewer is the `/read` route | OpenMRS session |
-| RIS report form (claim, author, sign) | **Depends on whether the study has an AI draft.** No COMPLETE finding: `…/radiologyReport.form?orderId=<uuid>` **is the claim** — it creates the draft and redirects to `?reportId=<n>`. Any COMPLETE finding (so ~45 of the cohort): that same URL throws an OpenMRS crash page, `cannot.create.already.claimed`, because ris-presign-bridge already made the draft — open `…/radiologyReport.form?reportId=<n>` instead. **Nothing in the UI tells you `<n>`** (#120): the Radiology → Reports list shows 0 of 0 because every AI draft has a NULL interpreter. Look it up before the session, see §1.7 | OpenMRS session |
+| RIS report form (claim, author, sign) | `…/radiologyReport.form?orderId=<uuid>` **is the claim**, and since o3 pin `o3-074c9b8d` (#120) it is safe on every study: with no report yet it creates the draft and redirects to `?reportId=<n>`; with one already there (the AI pre-sign draft on ~45 of the cohort, or a radiologist's own) it lands on that report instead of the `cannot.create.already.claimed` crash page. Radiology → Reports lists every draft too (interpreter column blank until claimed; a draft has no report date, so the date filter never hides one), and each row's eye icon opens the form. Verify both before the session, see §1.7 | OpenMRS session |
 | Patient chart (referring MD) | `https://demo.example.org/openmrs` → find patient → chart shows the **AI critical result notification** entry | physician's own OpenMRS account |
 | Critical-result ack (phone) | `https://demo.example.org/openmrs/ack/<taskId>?sig=…` — the signed link inside the chart notification. Under `/openmrs` since #126, which is what lets it reuse the physician's session; links minted before that carry `/reading-api/ack/…` and still work, on the Basic path | physician's OpenMRS account (live session, else an HTTP Basic prompt) |
 | Sign-off override (phone) | `https://demo.example.org/ingress/signoff/<workflowId>/override` — the link inside the escalation page | `SIGNOFF_OVERRIDE_TOKEN` |
@@ -110,12 +110,14 @@ origin the #75 Caddy overlay serves. Nothing else is reachable off-box.
 
 6. Smoke: `https://demo.example.org/` → 401 without the proxy login; `/reading` lists the
    cohort after login; one seeded `report_seeder.py finalize` releases a test study end to end.
-7. **Write down the `reportId` of every study you plan to open.** Any study with a COMPLETE
-   finding already has an AI draft, its `?orderId=` claim URL throws, and the RIS gives you no
-   way to find the draft's id: Radiology → Reports lists 0 of 0, because every AI draft has a
-   NULL `principal_results_interpreter` and the list inner-joins it (#120). Until that is fixed
-   the ids come from the database, so collect them BEFORE the session and keep them with the
-   arc sheet:
+7. **Check the AI drafts are reachable from the RIS.** Radiology → Reports, status filter
+   **DRAFT**: the AI pre-sign drafts are listed with the interpreter column blank (unclaimed),
+   and each row's eye icon opens `radiologyReport.form?reportId=<n>`. The `?orderId=` claim URL
+   lands on the same draft. Both are the #120 fix, in the o3 image since `o3-074c9b8d`. The
+   list used to show 0 of 0 because a draft has no report date and the tab's default date range
+   (last week) excluded it, not because of the NULL interpreter the issue first blamed. On an
+   older pin the list is empty and the claim URL throws, so the ids have to come from the
+   database instead, collected BEFORE the session and kept with the arc sheet:
 
    ```sql
    SELECT rr.report_id, o.accession_number
@@ -143,8 +145,8 @@ origin the #75 Caddy overlay serves. Nothing else is reachable off-box.
    **There is no Claim Report button on this build (#109).** Arc 1's study is a normal one with
    no COMPLETE finding, so it has no AI draft and the claim works the documented way: change
    `radiologyOrder` to `radiologyReport` in that URL, keeping the same `orderId`. That creates
-   the draft and redirects to `?reportId=<n>`. (This is the ONLY arc where that URL is safe —
-   see the location map and arc 2 step 4.) Author a normal report (FINDINGS + IMPRESSION sections), set
+   the draft and redirects to `?reportId=<n>`. (Safe on every study since #120: where a draft
+   already exists it opens that draft instead.) Author a normal report (FINDINGS + IMPRESSION sections), set
    **Results Interpreter** to yourself, then **Complete**, which is the sign. Expected: the page
    returns with "Report completed" and status **Completed**.
 5. **Narrate the silence:** poller joins the final DiagnosticReport within one cycle,
@@ -165,20 +167,20 @@ origin the #75 Caddy overlay serves. Nothing else is reachable off-box.
    date, not by finding, and the AI column is a bare margin multiplier with no pathology name —
    so the biggest badges on screen are effusions (8.1x, 7.8x) while a real pneumothorax can read
    1.2x. Do not invite the audience to spot the sick patient from the worklist.
-2. **Before anyone reads**, open the **report form** for the study (`?reportId=<n>`, see the
-   location map): the pre-sign draft impression is there, stamped **Created By: AI Presign
-   Bridge**, editable by the radiologist. Point at that stamp: the AI drafted before the human
+2. **Before anyone reads**, open the **report form** for the study: Radiology → Reports, status
+   **DRAFT**, the row's eye icon (or `radiologyReport.form?orderId=<uuid>`, which lands on the
+   existing draft since #120). The pre-sign draft impression is there, stamped **Created By: AI
+   Presign Bridge**, editable by the radiologist. Point at that stamp: the AI drafted before the human
    opened the study, and it can only ever overwrite its own draft.
    **Not** the order page — it shows the order only, no draft (verified 2026-08-20).
 3. **Worklist row click →** `/read?...`: PA + lateral hang, right panel already open, banner
    reads "Pneumothorax screening signal (not a read): positive at p=…" with zero clicks; show
    the CAD evidence overlay.
-4. **Report this study →** this study HAS an AI draft, so do **not** swap `radiologyOrder.form`
-   for `radiologyReport.form?orderId=` — that throws an OpenMRS crash page,
-   `cannot.create.already.claimed` (#120), complete with a "Found a bug?" form. Go to the draft
-   you already opened in step 2, `?reportId=<n>` → author, accepting or editing the draft
-   impression → set **Results Interpreter** (autocomplete on your own name) → **Complete**,
-   which is the sign.
+4. **Report this study →** the order page; change `radiologyOrder` to `radiologyReport` in
+   the URL exactly as in arc 1. This study HAS an AI draft, so the claim URL lands on it (#120)
+   rather than creating a second one or throwing: it is the same draft you opened in step 2.
+   Author, accepting or editing the draft impression → set **Results Interpreter**
+   (autocomplete on your own name) → **Complete**, which is the sign.
 5. **The page goes out.** Chart of the ordering patient (`/openmrs`, logged in as the referring
    physician): the **AI critical result notification** entry is on the chart — finding label +
    accession + the signed ack link, never the narrative.
@@ -217,8 +219,9 @@ and only a positive screen ever becomes a COMPLETE finding. Full detail: `docs/c
 
 ## 4. Arc 3 — sloppy dictation and the override (~4 min)
 
-Pick a study with **no** COMPLETE finding for this arc: it then has no AI draft, so the
-`?orderId=` claim works normally (arc 1 step 4) and nothing collides.
+Pick a study with **no** COMPLETE finding for this arc: it then has no AI draft, so the form
+opens empty and the sloppy dictation is entirely yours (a draft would already carry an
+IMPRESSION section, which is the thing this arc leaves out).
 
 1. **Restage** a cohort study; sign a report in the RIS **without an IMPRESSION section**
    (FINDINGS prose only, no IMPRESSION header).
