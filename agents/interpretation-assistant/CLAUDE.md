@@ -102,6 +102,20 @@ weights **baked at build** (`/root/.torchxrayvision`, `HOME=/root`). The `[imagi
 (pydicom+numpy) is on `radagent-common`. The agent-tests CI lane installs none of these, so
 `PIXEL_TOOLING` is False and the pixel path is exercised only by tests that fake Orthanc + the model.
 
+## Versioning: when `AGENT_VERSION` must move (#129)
+`AGENT_VERSION` in `handler.py` is stamped on every `toolsSelected[]` result, next to each tool's
+own `version`. It has to move whenever selection or scoring can change for the same study. The
+gated surface is `registry.py` (aliases, region rules, exclusions, reason-code rules). The pixel
+path (`cxr_model.py`, the tool table and thresholds in `handler.py`) is not gated because the
+constant lives in `handler.py`: bump by judgement there, as every head so far did. Bump the minor
+(`0.x.0`) and the card `contracts/cards/interpretation-assistant.json` together (#124).
+
+CI enforces it on merge requests (`scripts/check_agent_version_bumps.py`, the `agent-version-bumps`
+job): a diff that touches a gated surface without moving the constant fails the pipeline. A
+comment, docstring or test-only edit inside a surface is not a behaviour change; excuse it by
+naming this agent in a commit message in the range, `[no-behaviour-change: interpretation-assistant]`. A bare
+token excuses nothing, and a token never excuses an agent it does not name.
+
 ## Run / test
 `cd agents/interpretation-assistant && python -m pytest -q`
 

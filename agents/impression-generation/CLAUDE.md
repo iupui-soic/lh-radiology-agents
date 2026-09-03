@@ -27,6 +27,21 @@ output — just consume the inputs you're given.
 ## Data deps
 Inputs are passed in (`report`, `ehrContext`, `aiFindings`); fetch priors from `fhir2` if needed.
 
+## Versioning: when `AGENT_VERSION` must move (#129)
+`AGENT_VERSION` in `handler.py` is stamped on every draft this agent returns. It has to move
+whenever the prose or the flags can come out differently for the same inputs. Gated surfaces for
+this agent: `llm_draft.py` (prompt, guards, parser) and the shared `radagent_common/negation.py`
+(the `criticalFlags` scan). The deterministic template and the `criticalFlags` derivation live in
+`handler.py`, which the gate cannot watch because the constant lives there too: bump by judgement
+when you change either. Bump the minor (`0.x.0`) and the card
+`contracts/cards/impression-generation.json` together (#124).
+
+CI enforces it on merge requests (`scripts/check_agent_version_bumps.py`, the `agent-version-bumps`
+job): a diff that touches a gated surface without moving the constant fails the pipeline. A
+comment, docstring or test-only edit inside a surface is not a behaviour change; excuse it by
+naming this agent in a commit message in the range, `[no-behaviour-change: impression-generation]`. A bare
+token excuses nothing, and a token never excuses an agent it does not name.
+
 ## Run / test
 `cd agents/impression-generation && python -m pytest -q`
 
