@@ -26,7 +26,7 @@ def _run(*args, cwd):
 
 @pytest.fixture
 def repo(tmp_path, monkeypatch):
-    """A git repo with one agent at 0.1.0 and one rule, committed as `base`."""
+    """A git repo with two gated agents at 0.1.0 and the shared negation module, committed as `base`."""
     _run("git", "init", "-q", "-b", "main", cwd=tmp_path)
     _run("git", "config", "user.email", "t@example.invalid", cwd=tmp_path)
     _run("git", "config", "user.name", "T", cwd=tmp_path)
@@ -34,6 +34,13 @@ def repo(tmp_path, monkeypatch):
     (agent / "rules").mkdir(parents=True)
     (agent / "handler.py").write_text('AGENT_VERSION = "0.1.0"\n')
     (agent / "rules" / "a.yaml").write_text("id: a\n")
+    other = tmp_path / "agents" / "impression-generation"
+    other.mkdir(parents=True)
+    (other / "handler.py").write_text('AGENT_VERSION = "0.1.0"\n')
+    (other / "llm_draft.py").write_text("PROMPT = 'a'\n")
+    shared = tmp_path / "libs" / "radagent-common" / "radagent_common"
+    shared.mkdir(parents=True)
+    (shared / "negation.py").write_text("CUES = ('no',)\n")
     _run("git", "add", "-A", cwd=tmp_path)
     _run("git", "commit", "-qm", "base", cwd=tmp_path)
     monkeypatch.setattr(gate, "ROOT", tmp_path)
@@ -69,18 +76,61 @@ def test_handler_only_edits_are_not_a_behaviour_change(repo):
     assert gate.violations("HEAD~1") == []
 
 
-def test_the_skip_token_releases_the_gate(repo):
+def test_the_named_skip_token_releases_the_gate(repo):
     (repo / "agents/report-verification/rules/a.yaml").write_text("id: a  # typo fix\n")
-    _commit(repo, f"fix a comment {gate._SKIP_TOKEN}")
+    _commit(repo, "fix a comment [no-behaviour-change: report-verification]")
     assert gate.violations("HEAD~1") == []
 
 
 def test_the_skip_token_is_honoured_anywhere_in_the_range(repo):
     (repo / "agents/report-verification/rules/a.yaml").write_text("id: a  # one\n")
-    _commit(repo, f"docstring only {gate._SKIP_TOKEN}")
+    _commit(repo, "docstring only [no-behaviour-change: report-verification]")
     (repo / "agents/report-verification/rules/a.yaml").write_text("id: a  # two\n")
     _commit(repo, "another comment tweak")
     assert gate.violations("HEAD~2") == []
+
+
+def test_a_bare_skip_token_excuses_nothing(repo):
+    # The first version of the gate matched a bare token against the whole range, so a
+    # docstring-only edit in one agent silently excused a behaviour change in another (#129).
+    (repo / "agents/report-verification/rules/b.yaml").write_text("id: b\n")
+    _commit(repo, "add a rule [no-behaviour-change]")
+    (v,) = gate.violations("HEAD~1")
+    assert "report-verification" in v
+    assert "bare [no-behaviour-change]" in v and "must name the agent" in v
+
+
+def test_the_skip_token_excuses_only_the_agent_it_names(repo):
+    (repo / "agents/report-verification/rules/a.yaml").write_text("id: a  # reworded\n")
+    (repo / "agents/impression-generation/llm_draft.py").write_text("PROMPT = 'b'\n")
+    _commit(repo, "two agents, one excused [no-behaviour-change: report-verification]")
+    (v,) = gate.violations("HEAD~1")
+    assert v.startswith("[behaviour changed, version did not] impression-generation:")
+    assert "excused by name in this range: report-verification" in v
+
+
+def test_several_agents_can_be_named_in_one_token(repo):
+    (repo / "agents/report-verification/rules/a.yaml").write_text("id: a  # reworded\n")
+    (repo / "agents/impression-generation/llm_draft.py").write_text("PROMPT = 'b'  # note\n")
+    _commit(repo, "comments [no-behaviour-change: report-verification, impression-generation]")
+    assert gate.violations("HEAD~1") == []
+
+
+def test_a_shared_module_is_a_surface_for_every_agent_it_decides_for(repo):
+    (repo / "libs/radagent-common/radagent_common/negation.py").write_text("CUES = ('no', 'without')\n")
+    _commit(repo, "widen the negation cues")
+    found = gate.violations("HEAD~1")
+    assert [v.split("]")[1].split(":")[0].strip() for v in found] == [
+        "impression-generation", "report-verification"]
+    assert all("negation.py" in v for v in found)
+
+
+def test_a_shared_module_change_passes_when_every_agent_bumped(repo):
+    (repo / "libs/radagent-common/radagent_common/negation.py").write_text("CUES = ('no', 'without')\n")
+    (repo / "agents/report-verification/handler.py").write_text('AGENT_VERSION = "0.2.0"\n')
+    (repo / "agents/impression-generation/handler.py").write_text('AGENT_VERSION = "0.2.0"\n')
+    _commit(repo, "widen the negation cues and bump both consumers")
+    assert gate.violations("HEAD~1") == []
 
 
 def test_a_handler_with_no_version_constant_is_reported(repo):

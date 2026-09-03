@@ -42,6 +42,22 @@ for WARN/FAIL.
 - **M3:** replace the keyword/regex parse with the LLM/structured extraction path (negation-aware);
   richer body sources than the conclusion (e.g. `presentedForm`).
 
+## Versioning: when `AGENT_VERSION` must move (#129)
+`AGENT_VERSION` in `handler.py` is stamped on every result this agent returns, so an auditor can
+tell which build reached a verdict. It has to move whenever what the agent DOES changes, not only
+when the handler file does. For this agent that is any edit under `rules/` (YAML rules, custom
+rules, the engine, `report_body.py`) and any edit to the shared
+`radagent_common/negation.py`, which decides which findings the rules scan. Bump the minor
+(`0.x.0`) and bump the card `contracts/cards/report-verification.json` in the same change;
+`validate_contracts.py` fails when the two disagree (#124). Results already stamped with the old
+number are never restamped, which is the point: the number marks a boundary, not a build date.
+
+CI enforces it on merge requests (`scripts/check_agent_version_bumps.py`, the `agent-version-bumps`
+job): a diff that touches a gated surface without moving the constant fails the pipeline. A
+comment, docstring or test-only edit inside a surface is not a behaviour change; excuse it by
+naming this agent in a commit message in the range, `[no-behaviour-change: report-verification]`. A bare
+token excuses nothing, and a token never excuses an agent it does not name.
+
 ## Run / test
 `cd agents/report-verification && python -m pytest -q`
 

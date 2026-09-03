@@ -130,6 +130,19 @@ CritCom protocol format, with the category pre-decided. Invariants, all pinned i
 - The chart write (#79's ehr-inbox) always carries the deterministic LABEL, never the composed
   prose — the Observation stays minimal-content whatever the composer produced.
 
+## Versioning: when `AGENT_VERSION` must move (#129)
+`AGENT_VERSION` in `handler.py` is stamped on every dispatch, ack check and escalation this agent
+returns. It has to move whenever who gets paged, when, or what the ledger records can change for
+the same finding. The gated surface is `tools.py`. `classifier.py`, `routing.py` and `composer.py`
+change behaviour too and are not gated yet: bump by judgement when you touch them. Bump the minor
+(`0.x.0`) and the card `contracts/cards/communications.json` together (#124).
+
+CI enforces it on merge requests (`scripts/check_agent_version_bumps.py`, the `agent-version-bumps`
+job): a diff that touches a gated surface without moving the constant fails the pipeline. A
+comment, docstring or test-only edit inside a surface is not a behaviour change; excuse it by
+naming this agent in a commit message in the range, `[no-behaviour-change: communications]`. A bare
+token excuses nothing, and a token never excuses an agent it does not name.
+
 ## Run / test
 `cd agents/communications && python -m pytest -q`
 Run as a server: `uvicorn server:asgi_app --port 8106`

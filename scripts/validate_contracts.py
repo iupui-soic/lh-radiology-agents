@@ -48,8 +48,13 @@ for sf in schema_files:
 #
 #    KNOWN LIMIT, do not mistake this for more than it is: this catches the two fields
 #    DISAGREEING. It cannot catch both being stale together. An agent whose behaviour changes
-#    without anyone bumping AGENT_VERSION stays permanently "in sync" and permanently wrong. When
-#    to bump is a discipline no gate here enforces (PI note on #124).
+#    without anyone bumping AGENT_VERSION stays permanently "in sync" and permanently wrong.
+#    That half is enforced elsewhere, by design: whether behaviour changed is a fact about a
+#    CHANGE and needs a base ref, and this script stays git-free and locally runnable. See
+#    `scripts/check_agent_version_bumps.py` (the `agent-version-bumps` MR-pipeline job, #129):
+#    it fails a merge request that edits an agent's declared behaviour surface without moving
+#    AGENT_VERSION, with a per-agent `[no-behaviour-change: <agent>]` escape hatch for comment,
+#    docstring and test-only edits. Each agent's CLAUDE.md states the bump rule for its owner.
 _AGENT_VERSION_RE = re.compile(r'^AGENT_VERSION\s*=\s*["\']([^"\']+)["\']', re.M)
 
 for cf in sorted((CONTRACTS / "cards").glob("*.json")):
