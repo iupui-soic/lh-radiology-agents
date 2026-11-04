@@ -54,11 +54,13 @@ class FakeLedger:
 
     async def complete_ack_task(self, task_id: str, *, acknowledged_by: str,
                                 at_iso: str, on_behalf_of: str | None = None,
-                                late_deadline_iso: str | None = None) -> Task:
+                                late_deadline_iso: str | None = None,
+                                disposition: str | None = None) -> Task:
         self.completed.append((task_id, acknowledged_by))
         self.calls.append({"task_id": task_id, "acknowledged_by": acknowledged_by,
                            "on_behalf_of": on_behalf_of,
-                           "late_deadline_iso": late_deadline_iso})
+                           "late_deadline_iso": late_deadline_iso,
+                           "disposition": disposition})
         done = self.task.model_copy(deep=True)
         # Mirrors the real ledger's status rule (#128): a Task the escalation already FAILED keeps
         # that status, so a late ack cannot erase the miss. A fake that always set COMPLETED would
@@ -667,3 +669,190 @@ def test_the_name_is_read_with_the_callers_own_credential_not_a_service_account(
     client.get(f"/ack/task-7?sig={_sig()}")
     _, cookie_proof = ident.name_lookups[-1]
     assert cookie_proof.cookies == {"JSESSIONID": "sess-live"} and cookie_proof.auth is None
+
+
+# --- #139: the tap also says what has been done so far -----------------------------------------
+#
+# Feedback at SIIM CAIMI26, 2026-10-26: in a similar deployed system, physicians acknowledged
+# critical results but did not always act on them. Acknowledging is not acting, and a record that
+# holds only WHO and WHEN cannot tell the two apart.
+#
+# `_press` works from what the page renders rather than POSTing a constant, for the reason the #76
+# arc 2 comment in ack.py gives: a test that POSTs the endpoint directly passes whether or not the
+# button on the page could ever send that request.
+
+_ANSWERS = [   # the order is part of the design, see _DISPOSITIONS
+    ("seen-action-pending", "Seen, action pending"),
+    ("patient-contacted", "Patient contacted"),
+    ("test-or-treatment-ordered", "Test or treatment ordered"),
+    ("follow-up-scheduled", "Follow-up scheduled"),
+    ("already-known-no-action-needed", "Already known, no action needed"),
+    ("other", "Other"),
+]
+_CLOCK_CLOSED = "escalation clock for this result is now closed"
+
+
+def _url() -> str:
+    return f"http://testserver/ack/task-7?sig={_sig()}"
+
+
+def _buttons(page: str) -> list[tuple[str, str]]:
+    """Every answer button on the page, as (submitted value, label)."""
+    return [(html_mod.unescape(value), html_mod.unescape(label)) for value, label in re.findall(
+        r'<button\b[^>]*\bname="disposition"[^>]*\bvalue="([^"]*)"[^>]*>([^<]*)</button>', page)]
+
+
+def _press(client, code: str):
+    """What a browser does when this button is tapped: read the form off the rendered page, resolve
+    its action against the page's URL, and POST the pressed button's name=value form-encoded."""
+    page = client.get(_url(), auth=_AUTH).text
+    assert code in [value for value, _ in _buttons(page)], f"the page offers no {code} button"
+    return client.post(urljoin(_url(), _form_action(page)), data={"disposition": code}, auth=_AUTH)
+
+
+def test_every_answer_is_a_button_on_the_one_form(monkeypatch):
+    monkeypatch.setenv("CRITCOM_ACK_HMAC_SECRET", _SECRET)
+    client, ledger, _ = _rig_for(_addressed_task())
+    page = client.get(_url(), auth=_AUTH).text
+    assert _buttons(page) == _ANSWERS
+    assert page.count("<form") == 1
+    # No other submit: a button without a name and value would attest while recording no answer.
+    assert page.count("<button") == len(_ANSWERS)
+    assert ledger.completed == []                    # rendering them still changes nothing
+
+
+@pytest.mark.parametrize("task_kwargs, act", [
+    ({}, "Acknowledge"),
+    ({"owner": "prov-someone-else"}, "Acknowledge on their behalf"),
+    ({"deadline": _PAST}, "Record late acknowledgement"),
+])
+def test_the_page_says_what_the_tap_attests_above_the_buttons(monkeypatch, task_kwargs, act):
+    """The buttons now name answers, so the line above them has to carry what #127 and #128 made
+    the old single button say. A covering physician must still read "on their behalf" before the
+    tap, and a late one must still read "late"."""
+    monkeypatch.setenv("CRITCOM_ACK_HMAC_SECRET", _SECRET)
+    client, _, _ident = _rig_for(_addressed_task(**task_kwargs))
+    page = client.get(_url(), auth=_AUTH).text
+    line = f"<strong>{act}</strong> by choosing what has been done so far"
+    assert line in page
+    assert page.index(line) < page.index("<form")
+
+
+@pytest.mark.parametrize("code, label", _ANSWERS)
+def test_pressing_a_button_records_that_answer_and_closes_the_clock(monkeypatch, code, label):
+    monkeypatch.setenv("CRITCOM_ACK_HMAC_SECRET", _SECRET)
+    client, ledger, _ = _rig_for(_addressed_task())
+    r = _press(client, code)
+    assert r.status_code == 200
+    assert ledger.completed == [("task-7", "Dr Referrer (uuid-ref)")]
+    assert ledger.calls[0]["disposition"] == code
+    body = html_mod.unescape(r.text)
+    assert f"Status recorded: {label}." in body      # the result page mirrors what was recorded
+    assert _CLOCK_CLOSED in body                     # every answer closes it the same way
+
+
+def test_a_post_with_no_answer_still_acknowledges(monkeypatch):
+    """A page left open across a deploy posts no answer. That is still a physician acknowledging a
+    critical result, and refusing them would leave the escalation clock running against someone
+    acting in good faith."""
+    monkeypatch.setenv("CRITCOM_ACK_HMAC_SECRET", _SECRET)
+    client, ledger, _ = _rig_for(_addressed_task())
+    r = client.post(_url(), auth=_AUTH)
+    assert r.status_code == 200
+    assert ledger.completed == [("task-7", "Dr Referrer (uuid-ref)")]
+    assert ledger.calls[0]["disposition"] is None
+    assert "Status recorded" not in r.text
+
+
+@pytest.mark.parametrize("post_kwargs", [
+    {"data": {"disposition": "<script>alert(1)</script>"}},   # not one of ours
+    {"data": {"disposition": ""}},
+    {"data": {"something_else": "patient-contacted"}},
+    {"content": b"\xff\xfe%zz&&==",                           # not even valid text
+     "headers": {"content-type": "application/x-www-form-urlencoded"}},
+    {"json": {"disposition": "patient-contacted"}},           # not a form submit
+], ids=["unknown-value", "blank", "other-field", "malformed", "json"])
+def test_only_a_recognised_answer_is_recorded_and_the_ack_lands_anyway(monkeypatch, post_kwargs):
+    """Nothing a client typed reaches the ledger or the page, and none of it costs the ack."""
+    monkeypatch.setenv("CRITCOM_ACK_HMAC_SECRET", _SECRET)
+    client, ledger, _ = _rig_for(_addressed_task())
+    r = client.post(_url(), auth=_AUTH, **post_kwargs)
+    assert r.status_code == 200
+    assert ledger.completed == [("task-7", "Dr Referrer (uuid-ref)")]
+    assert ledger.calls[0]["disposition"] is None
+    body = html_mod.unescape(r.text)
+    assert "Status recorded" not in body and "<script>" not in body
+
+
+def test_the_query_string_cannot_supply_the_answer(monkeypatch):
+    """Only a button press answers, so no link can be crafted to pre-fill "patient contacted"."""
+    monkeypatch.setenv("CRITCOM_ACK_HMAC_SECRET", _SECRET)
+    client, ledger, _ = _rig_for(_addressed_task())
+    client.post(_url() + "&disposition=patient-contacted", auth=_AUTH)
+    assert ledger.calls[0]["disposition"] is None
+
+
+def test_a_get_carrying_an_answer_still_attests_nothing(monkeypatch):
+    """The prefetch-safety property holds for the new field too."""
+    monkeypatch.setenv("CRITCOM_ACK_HMAC_SECRET", _SECRET)
+    client, ledger, _ = _rig_for(_addressed_task())
+    r = client.get(_url() + "&disposition=patient-contacted", auth=_AUTH)
+    assert r.status_code == 200
+    assert ledger.completed == []
+
+
+def test_the_answer_travels_with_a_delegated_late_escalated_ack(monkeypatch):
+    """All three facts belong on the one record, and answering must not soften the page's claim
+    that on-call stays responsible."""
+    monkeypatch.setenv("CRITCOM_ACK_HMAC_SECRET", _SECRET)
+    client, ledger, _ = _rig_for(
+        _addressed_task(owner="prov-someone-else", deadline=_PAST, status=TaskStatus.FAILED))
+    r = _press(client, "patient-contacted")
+    call = ledger.calls[0]
+    assert call["disposition"] == "patient-contacted"
+    assert call["on_behalf_of"] == "Dr Addressee"
+    assert call["late_deadline_iso"] is not None
+    body = html_mod.unescape(r.text)
+    assert "Status recorded: Patient contacted." in body
+    assert "does not stand them down" in body
+    assert _CLOCK_CLOSED not in body
+
+
+@pytest.mark.parametrize("task_kwargs", [{}, {"deadline": _PAST}], ids=["in-time", "late"])
+def test_pending_says_no_reminder_will_be_sent(monkeypatch, task_kwargs):
+    """Nothing tracks a pending action yet, and the button could suggest otherwise. A physician who
+    assumes the system will chase it is the failure #139 exists to prevent."""
+    monkeypatch.setenv("CRITCOM_ACK_HMAC_SECRET", _SECRET)
+    client, _, _ident = _rig_for(_addressed_task(**task_kwargs))
+    body = html_mod.unescape(_press(client, "seen-action-pending").text)
+    assert "No reminder will be sent: the follow-up stays with you." in body
+
+
+@pytest.mark.parametrize("code", [code for code, _ in _ANSWERS if code != "seen-action-pending"])
+def test_only_pending_talks_about_reminders(monkeypatch, code):
+    monkeypatch.setenv("CRITCOM_ACK_HMAC_SECRET", _SECRET)
+    client, _, _ident = _rig_for(_addressed_task())
+    assert "reminder" not in html_mod.unescape(_press(client, code).text).lower()
+
+
+def test_pending_after_an_escalation_leaves_responsibility_with_on_call(monkeypatch):
+    """"The follow-up stays with you" would contradict the line above it: on-call was paged and
+    remains responsible."""
+    monkeypatch.setenv("CRITCOM_ACK_HMAC_SECRET", _SECRET)
+    client, _, _ident = _rig_for(_addressed_task(deadline=_PAST, status=TaskStatus.FAILED))
+    body = html_mod.unescape(_press(client, "seen-action-pending").text)
+    assert "remains responsible" in body
+    assert "stays with you" not in body
+
+
+def test_a_second_tap_cannot_change_the_recorded_answer(monkeypatch):
+    """Already acknowledged means never re-written, whichever button the second tap names. The
+    page must also not say nothing more is needed: the earlier answer may have been "pending"."""
+    monkeypatch.setenv("CRITCOM_ACK_HMAC_SECRET", _SECRET)
+    client, ledger, _ = _rig_for(_addressed_task(status=TaskStatus.COMPLETED))
+    r = client.post(_url(), data={"disposition": "patient-contacted"}, auth=_AUTH)
+    assert r.status_code == 200
+    assert ledger.calls == []
+    body = html_mod.unescape(r.text).lower()
+    assert "already acknowledged" in body
+    assert "nothing further is needed" not in body

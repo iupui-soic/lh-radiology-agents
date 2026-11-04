@@ -90,7 +90,8 @@ Communication keeps the typed `ServiceRequest` reference.
 The link in the chart entry resolves at the worklist-api's `GET /ack/{task_id}?sig=` route
 (`integrations/worklist-api/ack.py`): signature verified FIRST (a forged link never solicits
 credentials), then the human authenticates with their own OpenMRS account (HTTP Basic resolved
-through `/ws/rest/v1/session`), then the ledger Task closes with WHO on a `Task.note`
+through `/ws/rest/v1/session`), then the ledger Task closes with WHO on a `Task.note`, along with
+what the acknowledger says has been done so far (#139; recorded only, nothing reads it yet)
 (`complete_ack_task`) — `comms.checkAck` then reports COMPLETED and no escalation fires. Inert
 until `CRITCOM_ACK_HMAC_SECRET` is configured: producer-side no link is minted without it, and
 the verifier fails closed. `CRITCOM_ACK_BASE_URL` should be the externally-reachable route (for

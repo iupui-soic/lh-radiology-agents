@@ -191,9 +191,12 @@ origin the #75 Caddy overlay serves. Nothing else is reachable off-box.
    on this host under `/openmrs/ack/`, so an old `/reading-api/ack/` entry is listed with no
    **Acknowledge** link (the box never prints the URL itself). Two taps, by design (!114):
    the link opens a **confirmation page** naming who the acknowledgement will be attributed
-   to, and only the **Acknowledge** button on it attests. Opening the link never acknowledges
-   anything, so a preloading browser, a restored tab or a scanner cannot attest on the
-   physician's behalf. Re-tap: idempotent.
+   to, and only a button on it attests. Each button is one answer to what has been done so far
+   (**Seen, action pending**, **Patient contacted**, **Test or treatment ordered**,
+   **Follow-up scheduled**, **Already known, no action needed**, **Other**; #139), recorded on the
+   ledger Task's note beside who acknowledged. Every answer closes the clock the same way, and nothing tracks a pending action
+   yet. Opening the link never acknowledges anything, so a preloading browser, a restored tab or
+   a scanner cannot attest on the physician's behalf. Re-tap: idempotent.
    - **Identity comes first, and how depends on the route.** The signature is checked before
      any credential is solicited, so a forged link 403s without ever prompting. Then, if the
      browser sends a live OpenMRS `JSESSIONID`, the page is one click with no login. It only
