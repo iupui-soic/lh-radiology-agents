@@ -461,6 +461,11 @@ services:
       # poller matches nothing, and the study waits forever. Point it at the mounted volume below so
       # the join survives a container restart (mirrors the worklist-api SQLite store pattern).
       INGRESS_STORE_PATH: /data/ingress/ingress_state.db
+      # Post-ack follow-up check (#139 step 2). Unset = OFF, today's behaviour. How long to wait and
+      # what counts as action are PI decisions; see docs/post-ack-follow-up-check.md.
+      FOLLOWUP_CHECK_HOURS: ${FOLLOWUP_CHECK_HOURS:-}
+      FOLLOWUP_EVIDENCE_TYPES: ${FOLLOWUP_EVIDENCE_TYPES:-}
+      FOLLOWUP_REMINDER_CHANNELS: ${FOLLOWUP_REMINDER_CHANNELS:-}
     ports: ["8090:8090"]
     volumes:
       - ingress-store-data:/data/ingress

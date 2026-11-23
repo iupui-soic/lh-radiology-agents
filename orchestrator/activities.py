@@ -307,11 +307,86 @@ async def escalate_activity(workflow_id: str, reason: str, escalation: dict | No
         }
         # Every page carries the way OUT of the gate it is paging about (#57). The person being
         # woken is the person who can release the study; telling them to act without telling them
-        # how is how a study sits at this gate until its ladder runs out.
-        if SIGNOFF_OVERRIDE_URL:
+        # how is how a study sits at this gate until its ladder runs out. A #139 follow-up reminder
+        # pages about no gate at all (the study is archived), so it never carries that link.
+        if SIGNOFF_OVERRIDE_URL and escalation.get("kind") != "follow-up":
             payload["escalation"]["overrideUrl"] = SIGNOFF_OVERRIDE_URL.replace(
                 "{workflowId}", workflow_id)
     return await call_agent_skill(state.agent_base_url("communications"), "comms.dispatch", payload)
+
+
+# --- #139 step 2: did anyone ACT on an acknowledged critical result? ----------------------------
+# OFF unless FOLLOWUP_CHECK_HOURS is set. How long to wait and what counts as action are the PI's
+# decisions (#139), so both are configuration, read here (an activity) so the workflow stays
+# deterministic and the values it used are recorded in its history.
+_FOLLOWUP_TYPES = ("ServiceRequest", "Encounter", "Procedure")
+# The escalation contract's channel enum (contracts/escalation-policy.schema.json).
+_REMINDER_CHANNELS = ("in-app", "email", "sms", "pager", "phone")
+# A month. Anything longer is almost certainly a typo, and a Temporal timer that long is a study
+# nobody will remember asking about.
+_FOLLOWUP_MAX_HOURS = 24 * 30
+
+
+def _env_list(name: str, allowed: tuple[str, ...], default: tuple[str, ...]) -> list[str]:
+    """A comma list from the environment, kept to `allowed` (unknown names are logged, dropped)."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return list(default)
+    wanted = [v.strip() for v in raw.split(",") if v.strip()]
+    unknown = [v for v in wanted if v not in allowed]
+    if unknown:
+        activity.logger.warning("%s: ignoring unknown value(s) %s (allowed: %s)",
+                                name, unknown, ", ".join(allowed))
+    return [v for v in dict.fromkeys(wanted) if v in allowed]
+
+
+@activity.defn(name=state.ACT_LOAD_FOLLOWUP_POLICY)
+async def load_followup_policy_activity() -> dict:
+    """The post-ack follow-up check's settings, or {} when it is off (the default).
+
+    FOLLOWUP_CHECK_HOURS        hours to wait after the result was communicated; unset, not a
+                                number, not positive, or over a month -> off.
+    FOLLOWUP_EVIDENCE_TYPES     which new fhir2 resources count as action; default all three of
+                                ServiceRequest, Encounter, Procedure. None valid -> off.
+    FOLLOWUP_REMINDER_CHANNELS  where the reminder goes when nothing is found; default in-app.
+    """
+    raw = os.environ.get("FOLLOWUP_CHECK_HOURS", "").strip()
+    if not raw:
+        return {}
+    try:
+        hours = float(raw)
+    except ValueError:
+        activity.logger.warning("FOLLOWUP_CHECK_HOURS=%r is not a number; follow-up check off", raw)
+        return {}
+    if not (0 < hours <= _FOLLOWUP_MAX_HOURS):  # also refuses nan and inf
+        activity.logger.warning("FOLLOWUP_CHECK_HOURS=%r is outside (0, %d]; follow-up check off",
+                                raw, _FOLLOWUP_MAX_HOURS)
+        return {}
+    types = _env_list("FOLLOWUP_EVIDENCE_TYPES", _FOLLOWUP_TYPES, _FOLLOWUP_TYPES)
+    if not types:
+        activity.logger.warning("FOLLOWUP_EVIDENCE_TYPES names no known type; follow-up check off")
+        return {}
+    channels = _env_list("FOLLOWUP_REMINDER_CHANNELS", _REMINDER_CHANNELS, ("in-app",)) or ["in-app"]
+    return {"windowHours": hours, "evidenceTypes": types, "reminderChannels": channels}
+
+
+@activity.defn(name=state.ACT_CHECK_FOLLOWUP)
+async def check_followup_activity(patient_ref: str, own_order_ref: str | None, since_iso: str,
+                                  evidence_types: list[str]) -> dict:
+    """Look in fhir2 for follow-up action on the patient since the result was communicated.
+
+    References only, never content. The study's own order is excluded: the RIS updates it on
+    sign-off, which is not follow-up. Errors propagate so the workflow's bounded retry runs and a
+    persistent outage ends as CHECK_FAILED, never as "nothing found" (which would send a reminder).
+    """
+    exclude: tuple[str, ...] = ()
+    if own_order_ref:
+        exclude = (f"ServiceRequest/{own_order_ref.rsplit('/', 1)[-1]}",)
+    evidence = await Fhir2Client().search_follow_up_since(
+        patient_ref, since_iso, list(evidence_types), exclude)
+    activity.logger.info("follow-up check: %d evidence row(s) of %s", len(evidence),
+                         ",".join(evidence_types))
+    return {"evidence": evidence, "searched": list(evidence_types)}
 
 
 # Convenience for ingress: the RIS poller uses this to find finalized reports.

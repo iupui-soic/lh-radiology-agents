@@ -8,7 +8,7 @@ from temporalio.worker import Worker
 
 from radagent_common.tracing import init_tracing, tracing_enabled
 from .state import TASK_QUEUE
-from .workflow import StudyWorkflow
+from .workflow import FollowUpCheckWorkflow, StudyWorkflow
 from .activities import (
     call_agent_skill_activity,
     start_agent_skill_activity,
@@ -20,6 +20,8 @@ from .activities import (
     load_escalation_policy_activity,
     record_policy_failure_activity,
     record_signoff_abandoned_activity,
+    load_followup_policy_activity,
+    check_followup_activity,
 )
 
 TEMPORAL_TARGET = os.environ.get("TEMPORAL_TARGET", "temporal:7233")
@@ -55,6 +57,8 @@ ACTIVITIES = [
     load_escalation_policy_activity,
     record_policy_failure_activity,
     record_signoff_abandoned_activity,
+    load_followup_policy_activity,
+    check_followup_activity,
 ]
 
 
@@ -87,7 +91,7 @@ def build_worker(client: Client) -> Worker:
     return Worker(
         client,
         task_queue=TASK_QUEUE,
-        workflows=[StudyWorkflow],
+        workflows=[StudyWorkflow, FollowUpCheckWorkflow],
         activities=ACTIVITIES,
     )
 

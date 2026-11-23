@@ -1246,3 +1246,120 @@ def test_lean_allergy_keeps_the_free_text_of_an_uncoded_allergy():
 def test_lean_allergy_omits_display_when_there_is_none():
     from radagent_common.fhir_client import _lean_allergy
     assert _lean_allergy({"code": {"coding": [{"code": "91936005"}]}}) == {"code": "91936005"}
+
+
+# --- #139 step 2: follow-up evidence after an acknowledged critical result -------------------
+
+_SINCE = "2026-06-27T10:00:00+00:00"
+
+
+def _row(rtype: str, rid: str, updated: str | None) -> dict:
+    row = {"resourceType": rtype, "id": rid}
+    if updated is not None:
+        row["meta"] = {"lastUpdated": updated}
+    return row
+
+
+def test_follow_up_search_sends_bare_patient_and_inclusive_last_updated():
+    client = Fhir2Client()
+    calls = []
+
+    async def fake_get(path, params=None):
+        calls.append((path, params))
+        return _bundle()
+
+    client._get = fake_get  # type: ignore[assignment]
+    asyncio.run(client.search_follow_up_since("Patient/p-1", _SINCE, ["ServiceRequest", "Encounter"]))
+    assert calls == [
+        ("ServiceRequest", {"patient": "p-1", "_lastUpdated": "ge2026-06-27T10:00:00Z"}),
+        ("Encounter", {"patient": "p-1", "_lastUpdated": "ge2026-06-27T10:00:00Z"}),
+    ]
+
+
+def test_follow_up_search_sends_the_window_start_as_whole_seconds_utc():
+    """The workflow's own timestamp (microseconds, an offset) becomes the plain `...Z` instant fhir2
+    itself writes, floored to the second; flooring only widens the window."""
+    client = Fhir2Client()
+    calls = []
+
+    async def fake_get(path, params=None):
+        calls.append(params["_lastUpdated"])
+        return _bundle(_row("Encounter", "e-1", "2026-06-27T08:00:00.300Z"))
+
+    client._get = fake_get  # type: ignore[assignment]
+    refs = asyncio.run(client.search_follow_up_since(
+        "Patient/p-1", "2026-06-27T10:00:00.954321+02:00", ["Encounter"]))
+    assert calls == ["ge2026-06-27T08:00:00Z"]
+    assert refs == ["Encounter/e-1"], "same second as the floored start still counts"
+
+
+def test_follow_up_search_reapplies_the_window_client_side():
+    """A build that ignores _lastUpdated would return the patient's whole history, and every old row
+    would read as action taken. Rows older than the window, and rows that carry no lastUpdated,
+    never count."""
+    client = Fhir2Client()
+
+    async def fake_get(path, params=None):
+        return _bundle(*[
+            _row("ServiceRequest", "new", "2026-06-27T11:00:00Z"),
+            _row("ServiceRequest", "same-second", "2026-06-27T10:00:00Z"),
+            _row("ServiceRequest", "old", "2026-06-20T09:00:00Z"),
+            _row("ServiceRequest", "no-meta", None),
+        ])
+
+    client._get = fake_get  # type: ignore[assignment]
+    refs = asyncio.run(client.search_follow_up_since("Patient/p-1", _SINCE, ["ServiceRequest"]))
+    assert refs == ["ServiceRequest/new", "ServiceRequest/same-second"]
+
+
+def test_follow_up_search_excludes_the_study_own_order():
+    """The RIS updates the study's own order on sign-off; that is not follow-up."""
+    client = Fhir2Client()
+
+    async def fake_get(path, params=None):
+        return _bundle(*[_row("ServiceRequest", "own", "2026-06-27T11:00:00Z"),
+                        _row("ServiceRequest", "ct-ordered", "2026-06-27T12:00:00Z")])
+
+    client._get = fake_get  # type: ignore[assignment]
+    refs = asyncio.run(client.search_follow_up_since(
+        "Patient/p-1", _SINCE, ["ServiceRequest"], exclude_refs=("ServiceRequest/own",)))
+    assert refs == ["ServiceRequest/ct-ordered"]
+
+
+def test_follow_up_search_treats_an_unsupported_type_as_no_rows():
+    """A type this fhir2 build does not expose answers 404; that is no evidence, not a failure."""
+    import httpx
+
+    client = Fhir2Client()
+
+    async def fake_get(path, params=None):
+        if path == "Procedure":
+            raise httpx.HTTPStatusError("not found", request=httpx.Request("GET", "http://x/Procedure"),
+                                        response=httpx.Response(404))
+        return _bundle(*[_row(path, "e-1", "2026-06-27T11:00:00Z")])
+
+    client._get = fake_get  # type: ignore[assignment]
+    refs = asyncio.run(client.search_follow_up_since("Patient/p-1", _SINCE, ["Encounter", "Procedure"]))
+    assert refs == ["Encounter/e-1"]
+
+
+def test_follow_up_search_follows_bundle_paging():
+    client = Fhir2Client()
+    pages = iter([
+        _bundle(*[_row("Encounter", "e-1", "2026-06-27T11:00:00Z")], next_url="http://fhir/next"),
+        _bundle(*[_row("Encounter", "e-2", "2026-06-27T12:00:00Z")]),
+    ])
+
+    async def fake_get(path, params=None):
+        return next(pages)
+
+    client._get = fake_get  # type: ignore[assignment]
+    refs = asyncio.run(client.search_follow_up_since("Patient/p-1", _SINCE, ["Encounter"]))
+    assert refs == ["Encounter/e-1", "Encounter/e-2"]
+
+
+def test_follow_up_search_refuses_an_unparseable_window_start():
+    """Fail the check rather than guess: a guessed window could count old rows as action."""
+    client = Fhir2Client()
+    with pytest.raises(ValueError):
+        asyncio.run(client.search_follow_up_since("Patient/p-1", "yesterday", ["Encounter"]))

@@ -29,6 +29,9 @@ ACT_LOAD_ESCALATION_POLICY = "load_escalation_policy_activity"
 ACT_WRITE_PRESIGN_IMPRESSION = "write_presign_impression_activity"
 ACT_RECORD_POLICY_FAILURE = "record_policy_failure_activity"
 ACT_RECORD_SIGNOFF_ABANDONED = "record_signoff_abandoned_activity"
+# #139 step 2: the post-ack follow-up check (off unless FOLLOWUP_CHECK_HOURS is set).
+ACT_LOAD_FOLLOWUP_POLICY = "load_followup_policy_activity"
+ACT_CHECK_FOLLOWUP = "check_followup_activity"
 
 
 def callback_base_url() -> str:
