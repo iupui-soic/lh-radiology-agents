@@ -35,7 +35,7 @@ from radagent_common.tracing import now_iso
 
 from llm_draft import draft_impression
 
-AGENT_VERSION = "0.3.0"
+AGENT_VERSION = "0.4.0"
 _log = logging.getLogger(__name__)
 
 # Read-only fhir2 client for report-content lookup (#16). Lazily built so importing this module
@@ -141,6 +141,9 @@ async def handle(skill_id: str, payload: dict) -> dict:
             finding_labels=finding_labels,
             critical_flags=critical_flags,
             ehr_context=payload.get("ehrContext") or {},
+            # The table the flags above came from, so the prose is checked against the same
+            # vocabulary: a draft asserting a critical finding the flags lack is refused (#141).
+            critical_keywords=_CRITICAL_KEYWORDS,
         )
     except Exception:  # noqa: BLE001 - advisory only; must never strand the read (#77)
         _log.warning("impression LLM draft raised unexpectedly; falling back to the template")

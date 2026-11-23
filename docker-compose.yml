@@ -537,6 +537,10 @@ services:
       # Plaintext http to an LLM host is refused unless opted in; https always passes. Only set
       # this for a trusted in-network endpoint (a local Ollama or vLLM), never for a public one.
       IMPRESSION_LLM_ALLOW_INSECURE: ${IMPRESSION_LLM_ALLOW_INSECURE:-}
+      # A draft written WITHOUT a report that asserts a critical finding the flags lack is always
+      # rejected (#141). This decides the same for a draft written FROM a report, where the model
+      # may have read a finding the keyword scan missed: unset keeps the draft and logs a count.
+      IMPRESSION_LLM_REJECT_UNFLAGGED_CRITICAL: ${IMPRESSION_LLM_REJECT_UNFLAGGED_CRITICAL:-}
   # report-verification reads the finalized report's conclusion from live fhir2 (#22) to parse
   # report.body (laterality, sections, BI-RADS, density) for the PI rules — same credentials as
   # impression-generation; without them every fetch 401s and the body rules silently stay inert.

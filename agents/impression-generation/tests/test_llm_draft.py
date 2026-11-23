@@ -17,7 +17,7 @@ from llm_draft import LLMDraft, draft_impression
 _LLM_ENV = (
     "IMPRESSION_LLM_BASE_URL", "IMPRESSION_LLM_MODEL",
     "IMPRESSION_LLM_API_KEY", "IMPRESSION_LLM_TIMEOUT_SECONDS",
-    "IMPRESSION_LLM_ALLOW_INSECURE",
+    "IMPRESSION_LLM_ALLOW_INSECURE", "IMPRESSION_LLM_REJECT_UNFLAGGED_CRITICAL",
 )
 
 # Capture the real AsyncClient before any monkeypatch replaces it -- tests patch
@@ -876,3 +876,175 @@ async def test_the_prompt_names_confirmed_findings_as_authoritative(monkeypatch)
     assert "Confirmed AI screening findings (authoritative, do not contradict): pleural effusion" in prompt
     assert "MUST name each of them as present" in prompt
     assert "do NOT write that the study is normal" in prompt.replace("Do NOT", "do NOT")
+
+
+# --- #141: prose asserting a critical finding the flags do not contain ------------------------
+
+from handler import _CRITICAL_KEYWORDS  # noqa: E402 - the table the flags are derived from
+
+_REJECT_ENV = "IMPRESSION_LLM_REJECT_UNFLAGGED_CRITICAL"
+
+
+async def test_without_a_report_an_unflagged_critical_finding_is_rejected(monkeypatch, caplog):
+    """The gap #141 names. Pre-sign the model's only source is the screening labels the flags
+    already came from, so a second critical finding in the prose was invented -- and pre-sign
+    this prose is written to the RIS as the draft a radiologist reads first. Both replies carry
+    it, so the one retry cannot rescue the draft and the template takes its place."""
+    _clear(monkeypatch)
+    _configure(monkeypatch)
+    transport, seen = _responding(content=_draft_json(
+        "A pneumothorax is present, with an acute rib fracture.", ["Urgent clinical correlation."]))
+    _install(monkeypatch, transport)
+    out = await draft_impression(conclusion="", finding_labels="Pneumothorax",
+                                 critical_flags=CRITICAL_FLAGS, ehr_context={},
+                                 critical_keywords=_CRITICAL_KEYWORDS)
+    assert out is None
+    assert len(seen) == 2, "one retry, then the template"
+    assert "1 critical finding(s) the flags do not contain" in caplog.text
+    # The module's logging discipline: a count, never the finding or the prose.
+    assert "rib" not in caplog.text and "fracture" not in caplog.text
+
+
+async def test_a_retry_that_drops_the_invented_finding_is_accepted(monkeypatch):
+    _clear(monkeypatch)
+    _configure(monkeypatch)
+    bad = _draft_json("A pneumothorax is present, with an acute rib fracture.", ["Urgent clinical correlation."])
+    good = _draft_json("A pneumothorax is present on automated screening.", ["Urgent clinical correlation."])
+    transport, seen = _responding_sequence([bad, good])
+    _install(monkeypatch, transport)
+    out = await draft_impression(conclusion="", finding_labels="Pneumothorax",
+                                 critical_flags=CRITICAL_FLAGS, ehr_context={},
+                                 critical_keywords=_CRITICAL_KEYWORDS)
+    assert out is not None
+    assert out.impression_text == "A pneumothorax is present on automated screening."
+    assert len(seen) == 2
+
+
+async def test_a_negated_critical_term_is_not_an_assertion(monkeypatch):
+    """Same negation-aware scanner as the flag derivation: naming a finding only to rule it out
+    states nothing, and rejecting it would cost the LLM draft for an accurate sentence."""
+    _clear(monkeypatch)
+    _configure(monkeypatch)
+    transport, _ = _responding(content=_draft_json(
+        "A pneumothorax is present. No fracture is seen.", ["Urgent clinical correlation."]))
+    _install(monkeypatch, transport)
+    out = await draft_impression(conclusion="", finding_labels="Pneumothorax",
+                                 critical_flags=CRITICAL_FLAGS, ehr_context={},
+                                 critical_keywords=_CRITICAL_KEYWORDS)
+    assert out is not None
+
+
+async def test_a_recommendation_naming_another_finding_is_not_scanned(monkeypatch):
+    """The scanner reads "CT to rule out pulmonary embolism" as asserting the embolism, so scanning
+    recommendations would reject ordinary next-step advice. impressionText is the finding line;
+    this pins that the recommendations are deliberately left out of the #141 check."""
+    _clear(monkeypatch)
+    _configure(monkeypatch)
+    transport, _ = _responding(content=_draft_json(
+        "A pneumothorax is present.",
+        ["Urgent clinical correlation; consider CT to rule out pulmonary embolism."]))
+    _install(monkeypatch, transport)
+    out = await draft_impression(conclusion="", finding_labels="Pneumothorax",
+                                 critical_flags=CRITICAL_FLAGS, ehr_context={},
+                                 critical_keywords=_CRITICAL_KEYWORDS)
+    assert out is not None
+
+
+async def test_a_flagged_finding_never_counts_as_unflagged(monkeypatch, caplog):
+    """The check compares LABELS: a keyword whose label is flagged ("embolism" -> "pulmonary
+    embolism") is the flag itself, not an extra finding."""
+    _clear(monkeypatch)
+    _configure(monkeypatch)
+    flags = [{"label": "pulmonary embolism", "severity": "critical"}]
+    transport, seen = _responding(content=_draft_json(
+        "Findings are consistent with a pulmonary embolism.", ["Urgent clinical correlation."]))
+    _install(monkeypatch, transport)
+    out = await draft_impression(conclusion="", finding_labels="Pulmonary embolism",
+                                 critical_flags=flags, ehr_context={},
+                                 critical_keywords=_CRITICAL_KEYWORDS)
+    assert out is not None
+    assert len(seen) == 1
+    assert "flags do not contain" not in caplog.text
+
+
+async def test_with_a_report_the_draft_is_kept_and_counted_by_default(monkeypatch, caplog):
+    """#141's open PI call. Here the keyword scan missed the report's "PTX" (no flag), but the model
+    read it correctly. Rejecting would put the template's "No acute findings identified" in place
+    of a correct draft, so unless the switch is on the draft rides and the case is counted."""
+    _clear(monkeypatch)
+    _configure(monkeypatch)
+    transport, seen = _responding(content=_draft_json("Small apical pneumothorax."))
+    _install(monkeypatch, transport)
+    out = await draft_impression(conclusion="Small apical PTX.", finding_labels=[],
+                                 critical_flags=[], ehr_context={},
+                                 critical_keywords=_CRITICAL_KEYWORDS)
+    assert out is not None
+    assert out.impression_text == "Small apical pneumothorax."
+    assert len(seen) == 1
+    assert "asserts 1 critical finding(s) the flags do not contain; kept" in caplog.text
+    assert "apical" not in caplog.text
+
+
+async def test_with_a_report_the_switch_rejects_the_draft(monkeypatch):
+    _clear(monkeypatch)
+    _configure(monkeypatch)
+    monkeypatch.setenv(_REJECT_ENV, "1")
+    transport, seen = _responding(content=_draft_json("Small apical pneumothorax."))
+    _install(monkeypatch, transport)
+    out = await draft_impression(conclusion="Small apical PTX.", finding_labels=[],
+                                 critical_flags=[], ehr_context={},
+                                 critical_keywords=_CRITICAL_KEYWORDS)
+    assert out is None
+    assert len(seen) == 2
+
+
+async def test_the_switch_accepts_only_the_documented_truthy_values(monkeypatch):
+    """The same truthy set as IMPRESSION_LLM_ALLOW_INSECURE, so an operator's "0" or "false" never
+    turns the reject on by being non-empty."""
+    _clear(monkeypatch)
+    _configure(monkeypatch)
+    for value in ("0", "false", "no", ""):
+        monkeypatch.setenv(_REJECT_ENV, value)
+        transport, _ = _responding(content=_draft_json("Small apical pneumothorax."))
+        _install(monkeypatch, transport)
+        out = await draft_impression(conclusion="Small apical PTX.", finding_labels=[],
+                                     critical_flags=[], ehr_context={},
+                                     critical_keywords=_CRITICAL_KEYWORDS)
+        assert out is not None, value
+    for value in ("1", "true", "TRUE", " yes "):
+        monkeypatch.setenv(_REJECT_ENV, value)
+        transport, _ = _responding(content=_draft_json("Small apical pneumothorax."))
+        _install(monkeypatch, transport)
+        out = await draft_impression(conclusion="Small apical PTX.", finding_labels=[],
+                                     critical_flags=[], ehr_context={},
+                                     critical_keywords=_CRITICAL_KEYWORDS)
+        assert out is None, value
+
+
+async def test_a_normal_post_sign_draft_is_untouched(monkeypatch, caplog):
+    _clear(monkeypatch)
+    _configure(monkeypatch)
+    monkeypatch.setenv(_REJECT_ENV, "1")
+    transport, _ = _responding(
+        content=_draft_json("No acute cardiopulmonary abnormality.", recommendations=[]))
+    _install(monkeypatch, transport)
+    out = await draft_impression(conclusion="Lungs are clear.", finding_labels=[],
+                                 critical_flags=[], ehr_context={},
+                                 critical_keywords=_CRITICAL_KEYWORDS)
+    assert out is not None
+    assert "flags do not contain" not in caplog.text
+
+
+
+async def test_the_kept_count_is_never_logged_for_a_draft_a_later_check_refused(monkeypatch, caplog):
+    """The "kept" line must mean kept. Here the draft asserts an unflagged critical finding (kept
+    with a report) but drops the confirmed effusion, which a later check refuses."""
+    _clear(monkeypatch)
+    _configure(monkeypatch)
+    transport, _ = _responding(content=_draft_json("Small apical pneumothorax."))
+    _install(monkeypatch, transport)
+    out = await draft_impression(conclusion="Small apical PTX.", finding_labels=[EFFUSION_LABEL],
+                                 critical_flags=[], ehr_context={},
+                                 critical_keywords=_CRITICAL_KEYWORDS)
+    assert out is None
+    assert "; kept because" not in caplog.text
