@@ -84,6 +84,7 @@ For the live A2A + Temporal wiring, install the app extras and pin the SDKs:
 | [`presign-concept.md`](docs/presign-concept.md) | The dedicated authorship concept behind the AI pre-sign draft |
 | [`cad-inference.md`](docs/cad-inference.md) | Where CAD inference runs vs. what the viewer renders |
 | [`ehr-inbox-notification.md`](docs/ehr-inbox-notification.md) | The in-EHR critical-result notification channel |
+| [`post-ack-follow-up-check.md`](docs/post-ack-follow-up-check.md) | Optional check that someone acted on an acknowledged critical result (#139) |
 | [`dicom-evidence-writeback.md`](docs/dicom-evidence-writeback.md) | Safety case for writing AI evidence back into Orthanc |
 | [`ohif-integration-approach.md`](docs/ohif-integration-approach.md) | OHIF integration decision record |
 | [`embed-mammography-mapping.md`](docs/embed-mammography-mapping.md) | EMBED mammography mapping spike (M5 groundwork) |

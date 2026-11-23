@@ -18,7 +18,7 @@ from typing import Any, Optional
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
-from temporalio.exceptions import ActivityError, ApplicationError
+from temporalio.exceptions import ActivityError, ApplicationError, WorkflowAlreadyStartedError
 
 from .state import (
     State,
@@ -32,6 +32,8 @@ from .state import (
     ACT_WRITE_PRESIGN_IMPRESSION,
     ACT_RECORD_POLICY_FAILURE,
     ACT_RECORD_SIGNOFF_ABANDONED,
+    ACT_LOAD_FOLLOWUP_POLICY,
+    ACT_CHECK_FOLLOWUP,
 )
 
 # Tunables (could be moved to a config activity later).
@@ -130,6 +132,12 @@ PATCH_SIGNOFF_OVERRIDE = "signoff-override-v1"
 # LIVE -> True -> release. First read for a genuinely old history that RECORDED a re-verify happens
 # while still replaying -> False -> re-verify, exactly as recorded.
 PATCH_SIGNOFF_GATE_TERMINAL = "signoff-gate-terminal-v1"
+# The post-ack follow-up check (#139 step 2, off unless FOLLOWUP_CHECK_HOURS is set). It adds an
+# activity, and possibly a child-workflow start, after the ack loop. An ARCHIVED study's history
+# ends there, and closed histories are replayed (a query, a reset), so the marker keeps a pre-#139
+# history replaying exactly what it recorded. Same hazard and same remedy as PATCH_ACK_LOOP.
+PATCH_FOLLOWUP_CHECK = "post-ack-followup-check-v1"
+FOLLOWUP_WORKFLOW_SUFFIX = "-followup"
 # How a sign-off gate ended. ACKNOWLEDGED: a radiologist released it (via the #57 override endpoint,
 # or -- at M2 -- the addendum flow). ABANDONED: the ladder ran out with nobody acknowledging; the
 # study is released anyway, with the FAIL and the non-acknowledgement both recorded.
@@ -455,6 +463,40 @@ class StudyWorkflow:
         )
         return {"ackStatus": "UNACKNOWLEDGED", "taskId": task_id, "escalations": escalations}
 
+    async def _start_follow_up_check(self, ctx: dict, communicated_at: datetime) -> dict:
+        """Schedule the post-ack follow-up check (#139 step 2) if it is switched on. Best-effort:
+        a settings or start failure is logged and the study archives exactly as before."""
+        wf_id = ctx["workflowId"]
+        try:
+            policy = await workflow.execute_activity(
+                ACT_LOAD_FOLLOWUP_POLICY,
+                start_to_close_timeout=PRE_READ_TIMEOUT,
+                retry_policy=BOUNDED_ACTIVITY_RETRY,
+            )
+        except ActivityError:
+            workflow.logger.warning("follow-up check settings unavailable for %s; not checking", wf_id)
+            return {}
+        if not policy.get("windowHours"):
+            return {}  # off: the default
+        patient = (ctx.get("patient") or {}).get("fhirPatientId")
+        if not patient:
+            return {"status": "SKIPPED", "reason": "no patient reference to check"}
+        child_id = f"{wf_id}{FOLLOWUP_WORKFLOW_SUFFIX}"
+        try:
+            await workflow.start_child_workflow(
+                FollowUpCheckWorkflow.run,
+                {"workflowId": wf_id, "patient": patient,
+                 "order": (ctx.get("order") or {}).get("fhirServiceRequestId"),
+                 "since": communicated_at.isoformat(), **policy},
+                id=child_id,
+                # ABANDON: the check must outlive the study it checks on, by design.
+                parent_close_policy=workflow.ParentClosePolicy.ABANDON,
+            )
+        except WorkflowAlreadyStartedError:
+            workflow.logger.warning("follow-up check %s already exists; not starting another", child_id)
+            return {"status": "NOT_SCHEDULED", "reason": "a check with this id already exists"}
+        return {"status": "SCHEDULED", "workflowId": child_id, "windowHours": policy["windowHours"]}
+
     async def _record_signoff_abandoned(self, wf_id: str, tier: Optional[str], pages: int) -> None:
         """Dead-letter a gate that ran out of ladder with nobody acknowledging (#57).
 
@@ -768,6 +810,9 @@ class StudyWorkflow:
 
         # --- COMMUNICATE: hand off to the existing Communications Agent (A2A) -----
         self._state = State.COMMUNICATE
+        # When the result was communicated: the start of the window in which follow-up action is
+        # looked for (#139). Workflow time, so a replay reads the same instant.
+        communicated_at = workflow.now()
         comms = await self._call(
             "communications",
             "comms.dispatch",
@@ -801,6 +846,16 @@ class StudyWorkflow:
                 retry_policy=BOUNDED_ACTIVITY_RETRY,
             )
 
+        # --- #139 step 2: did anyone ACT on the acknowledged result? (off by default) --------
+        # Only after an acknowledgement: an unacknowledged result has already been escalated by
+        # the ack loop. The check itself runs in a CHILD workflow that outlives this one, so the
+        # study still finishes the moment it archives; keeping it open for a day would make the
+        # RIS poller's post-archive addendum land in a live study instead of the dead letter #66
+        # files it as.
+        follow_up: dict = {}
+        if ack.get("ackStatus") == "COMPLETED" and workflow.patched(PATCH_FOLLOWUP_CHECK):
+            follow_up = await self._start_follow_up_check(ctx, communicated_at)
+
         return {
             "workflowId": wf_id,
             "finalState": self._state.value,
@@ -813,6 +868,9 @@ class StudyWorkflow:
             # addendum released the gate and its re-verify passed (#66; addendum audit field is a
             # noted follow-up).
             "signoff": self._signoff,
+            # #139 step 2: whether a follow-up check was scheduled, and where it runs. Empty when it
+            # is off (the default) or no acknowledged critical result needed one.
+            "followUp": follow_up,
         }
 
     # ---- signals & queries -------------------------------------------------------
@@ -904,3 +962,56 @@ class StudyWorkflow:
                 if isinstance(i, dict)
             ],
         }
+
+
+@workflow.defn
+class FollowUpCheckWorkflow:
+    """#139 step 2: after a critical result was ACKNOWLEDGED, check that someone acted on it.
+
+    Acknowledgement is not action (SIIM CAIMI26 feedback). Started by StudyWorkflow as an abandoned
+    child, so the study archives on time while this waits. One durable timer for the configured
+    window, one fhir2 look for follow-up (an order other than the study's own, an encounter, a
+    procedure, as configured), and one reminder to the ordering physician if nothing is there.
+    Bounded by construction: one check, at most one reminder, then it ends with its outcome.
+    A failed check never sends the reminder, because "could not look" is not "nothing found".
+    """
+
+    @workflow.run
+    async def run(self, args: dict) -> dict:
+        hours = float(args["windowHours"])
+        started_at = workflow.now().isoformat()
+        await workflow.sleep(timedelta(hours=hours))
+        out = {"windowHours": hours, "since": args["since"], "startedAt": started_at,
+               "checkedAt": workflow.now().isoformat()}
+        try:
+            found = await workflow.execute_activity(
+                ACT_CHECK_FOLLOWUP,
+                args=[args["patient"], args.get("order"), args["since"], args["evidenceTypes"]],
+                start_to_close_timeout=SKILL_TIMEOUT,
+                retry_policy=BOUNDED_ACTIVITY_RETRY,
+            )
+        except ActivityError:
+            workflow.logger.warning("follow-up check for %s could not reach fhir2; no reminder sent",
+                                    args["workflowId"])
+            return {**out, "status": "CHECK_FAILED"}
+        if found.get("evidence"):
+            return {**out, "status": "FOUND", "evidence": found["evidence"]}
+
+        # Nothing on record: remind the ordering physician through the same comms.dispatch
+        # escalation path the sign-off ladder uses. IDs and policy only, never PHI.
+        reason = (f"critical result acknowledged, but no follow-up "
+                  f"{', '.join(args['evidenceTypes'])} was recorded within {hours:g} h (#139)")
+        rung = {"kind": "follow-up", "level": 1, "targetRole": "ordering-physician",
+                "channels": list(args["reminderChannels"]), "urgency": "urgent", "attempt": 1}
+        try:
+            await workflow.execute_activity(
+                ACT_ESCALATE,
+                args=[args["workflowId"], reason, rung],
+                start_to_close_timeout=SKILL_TIMEOUT,
+                retry_policy=BOUNDED_ACTIVITY_RETRY,
+            )
+        except ActivityError:
+            workflow.logger.warning("follow-up reminder for %s could not be sent", args["workflowId"])
+            return {**out, "status": "NOT_FOUND", "reminded": False}
+        return {**out, "status": "NOT_FOUND", "reminded": True}
+

@@ -8,6 +8,7 @@ Methods are stubs for M0; wire to the live fhir2 base URL in M1. Every agent tha
 clinical data uses THIS client (lean-reference: fetch from source, do not pass PHI in messages).
 """
 from __future__ import annotations
+from datetime import datetime, timezone
 from typing import Any, Optional
 import logging
 import os
@@ -349,6 +350,43 @@ class Fhir2Client:
             "MedicationRequest",
             {"patient": _patient_query(fhir_patient_id)})
         return [_lean_medication(r) for r in entries if _medication_is_active(r)]
+
+    async def search_follow_up_since(self, fhir_patient_id: str, since_iso: str,
+                                     resource_types: list[str],
+                                     exclude_refs: tuple[str, ...] = ()) -> list[str]:
+        """`Type/id` references to the patient's resources of `resource_types` last updated at or
+        after `since_iso` -- the evidence #139's post-ack check looks for (a follow-up order,
+        encounter or procedure after a critical result was acknowledged). References only, never
+        resource content.
+
+        `_lastUpdated=ge` is sent AND re-applied client-side: a build that ignored the parameter
+        would hand back the patient's whole history, and every old row would then read as action
+        taken. A row without `meta.lastUpdated` cannot be shown to be recent, so it is not counted
+        (the safe direction: a missed row costs a reminder, a wrongly counted one costs the check).
+        A type this fhir2 build does not expose answers 404, which _collect turns into no rows.
+        `exclude_refs` drops rows the pipeline itself touches, such as the study's own order.
+        Raises ValueError on an unparseable `since_iso`, so the check fails instead of guessing.
+
+        The window start is floored to the whole second and sent as UTC `Z`, the shape fhir2's own
+        `meta.lastUpdated` uses: a workflow timestamp carries microseconds and an offset, which a
+        FHIR server may refuse as a date parameter, and flooring only ever widens the window.
+        """
+        since = _parse_instant(since_iso)
+        if since is None:
+            raise ValueError("search_follow_up_since needs an ISO-8601 instant")
+        since = since.astimezone(timezone.utc).replace(microsecond=0)
+        since_param = since.strftime("%Y-%m-%dT%H:%M:%SZ")
+        excluded = set(exclude_refs)
+        refs: list[str] = []
+        for resource_type in resource_types:
+            rows = await self._collect(resource_type, {
+                "patient": _patient_query(fhir_patient_id), "_lastUpdated": f"ge{since_param}"})
+            for row in rows:
+                ref = f"{resource_type}/{row.get('id')}" if row.get("id") else None
+                updated = _parse_instant((row.get("meta") or {}).get("lastUpdated") or "")
+                if ref and ref not in excluded and updated is not None and updated >= since:
+                    refs.append(ref)
+        return refs
 
     async def _collect(self, path: str, params: dict[str, Any]) -> list[dict]:
         """Follow Bundle `next` links and yield every resource entry — the common
@@ -796,6 +834,15 @@ def _accession_number(report: dict) -> Optional[str]:
 # decision-relevant slice that matches the corresponding items schema in
 # `contracts/skills/ehr.schema.json`. NO raw record dumps — refs, codes, values
 # only (lean-reference: PHI minimization).
+
+
+def _parse_instant(value: str) -> Optional[datetime]:
+    """An ISO-8601 instant as an aware datetime (a naive one is read as UTC), or None."""
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (AttributeError, TypeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 def _patient_query(fhir_patient_id: str) -> str:
