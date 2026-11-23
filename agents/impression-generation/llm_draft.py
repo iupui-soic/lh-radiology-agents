@@ -27,6 +27,7 @@ import json
 import logging
 import os
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
@@ -100,6 +101,22 @@ def _egress_transport_is_secure(base_url: str) -> bool:
     if not _is_plaintext_remote(base_url):
         return True  # https, or a loopback host
     return os.environ.get("IMPRESSION_LLM_ALLOW_INSECURE", "").strip().lower() in {"1", "true", "yes"}
+
+
+def _reject_unflagged_critical_with_a_report() -> bool:
+    """#141's open safety call, as a switch: may a draft WRITTEN FROM A REPORT assert a critical
+    finding the flags do not contain?
+
+    Without a report the answer is always no (see _parse_draft), because the model then has nothing
+    it could have read the finding from. With a report it can: the deterministic scan reads only
+    the finding-bearing sections with a conservative matcher, so a finding the scan missed (an
+    abbreviation, an unusual phrasing) may be one the model read correctly. Rejecting that draft
+    puts the template's "No acute findings identified" in its place, so whether to reject is the
+    PI's decision. Off (the default) keeps today's behaviour and logs a count; the same truthy set
+    as IMPRESSION_LLM_ALLOW_INSECURE turns the reject on.
+    """
+    return os.environ.get("IMPRESSION_LLM_REJECT_UNFLAGGED_CRITICAL", "").strip().lower() in {
+        "1", "true", "yes"}
 
 
 @dataclass(frozen=True)
@@ -363,8 +380,14 @@ def _first_json_object(text: str) -> str:
 
 
 def _parse_draft(content: str, critical_flags: list[dict],
-                 finding_terms: list[str] | None = None, grounding: str = "") -> LLMDraft:
-    """Raises on anything unusable; draft_impression() turns every raise into a None."""
+                 finding_terms: list[str] | None = None, grounding: str = "",
+                 critical_keywords: Mapping[str, str] | None = None,
+                 reject_unflagged_critical: bool = False) -> LLMDraft:
+    """Raises on anything unusable; draft_impression() turns every raise into a None.
+
+    `critical_keywords` is handler.py's keyword -> label table, the one criticalFlags is derived
+    from. With it, prose asserting a critical finding the flags do not contain is rejected when
+    `reject_unflagged_critical` is set and only counted otherwise (#141)."""
     parsed = json.loads(_first_json_object(content.strip()))
     impression_text = parsed["impressionText"]
     recommendations = parsed["recommendations"]
@@ -428,6 +451,30 @@ def _parse_draft(content: str, critical_flags: list[dict],
         if missing:
             raise ValueError(
                 f"prose does not assert {len(missing)} of {len(flag_labels)} confirmed critical flag(s)")
+    # The converse (#141): prose ASSERTING a critical finding the flags do not contain. The flags
+    # are derived before the model runs, so such a draft changes no flag -- but its prose still
+    # travels: pre-sign it is written to the RIS as the preliminary draft a radiologist reads, and
+    # post-sign Report Verification's rules read it. Same scanner and keyword table as the
+    # derivation, so "possible pneumothorax" counts as asserted here exactly as it would there.
+    #
+    # impressionText only. A recommendation is advice, and the scanner reads ordinary next-step
+    # advice ("CT to rule out pulmonary embolism") as asserting the finding it names, so scanning
+    # recommendations would reject routine drafts for a sentence that states no finding.
+    #
+    # Whether to reject depends on what the model was given, which the caller decides: with no
+    # report its only source is the screening labels the flags already came from, so an extra
+    # critical finding was invented (or lifted from history the prompt forbids it to describe) and
+    # is rejected; with a report, see _reject_unflagged_critical_with_a_report.
+    unflagged: set[str] = set()
+    if critical_keywords:
+        unflagged = {
+            critical_keywords[keyword].lower()
+            for keyword in find_asserted_terms(impression_text, critical_keywords)
+        } - set(flag_labels)
+        if unflagged and reject_unflagged_critical:
+            # Count only, never the finding or the prose: the module's logging discipline.
+            raise ValueError(
+                f"prose asserts {len(unflagged)} critical finding(s) the flags do not contain")
     # The same rule for a CONFIRMED NON-CRITICAL finding. Criticality decides whether anything
     # pages; it does not decide whether the prose may contradict the model. A draft is only
     # written when some finding is COMPLETE, so prose that asserts normality next to one is the
@@ -437,6 +484,13 @@ def _parse_draft(content: str, critical_flags: list[dict],
     for term in finding_terms or []:
         if term not in set(find_asserted_terms(impression_text, [term])):
             raise ValueError("prose does not assert a confirmed screening finding")
+    if unflagged:
+        # Logged only here, once every check has passed, so the line never claims a draft was kept
+        # that a later check then refused. A count, never the finding or the prose.
+        _log.warning(
+            "impression LLM draft asserts %d critical finding(s) the flags do not contain; kept "
+            "because it was written from a report (IMPRESSION_LLM_REJECT_UNFLAGGED_CRITICAL=1 "
+            "rejects it, #141)", len(unflagged))
     return LLMDraft(
         impression_text=impression_text.strip(),
         recommendations=[r.strip() for r in recommendations],
@@ -465,10 +519,14 @@ def _note_fallback() -> None:
 
 async def draft_impression(
     *, conclusion: str, finding_labels: str | list[str], critical_flags: list[dict], ehr_context: dict,
+    critical_keywords: Mapping[str, str] | None = None,
 ) -> LLMDraft | None:
     """The sole entry point. Returns None -- never raises -- when the LLM path is unset,
     misconfigured, or fails/produces something unusable for any reason; handler.py falls back to
-    the deterministic template on None, exactly as it already does for a fhir2 fetch failure."""
+    the deterministic template on None, exactly as it already does for a fhir2 fetch failure.
+
+    `critical_keywords` is the table `critical_flags` was derived from (handler.py passes it), so
+    the parser can check the prose against the same vocabulary (#141)."""
     config = _configured()
     if config is None:
         return None
@@ -506,6 +564,9 @@ async def draft_impression(
             )
 
         finding_terms = _finding_terms(finding_labels)
+        # No report text means the screening labels were the model's only source (#141): a
+        # pre-sign draft, or a post-sign one whose conclusion fetch failed.
+        reject_unflagged = not (conclusion or "").strip() or _reject_unflagged_critical_with_a_report()
         prompt = _build_prompt(
             conclusion=conclusion,
             labels_text=_labels_as_text(finding_labels),
@@ -515,7 +576,9 @@ async def draft_impression(
         )
         content = await _chat_completion(base_url, model, api_key, timeout, prompt)
         try:
-            return _parse_draft(content, critical_flags, finding_terms, grounding=prompt)
+            return _parse_draft(content, critical_flags, finding_terms, grounding=prompt,
+                                critical_keywords=critical_keywords,
+                                reject_unflagged_critical=reject_unflagged)
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as first:
             # One retry, and only for a reply we could not use (#103). The model answered, so the
             # endpoint and the key are fine; it emitted a raw newline or an unescaped quote inside
@@ -530,7 +593,9 @@ async def draft_impression(
             _log.warning("impression LLM draft malformed: %s: %s; retrying once",
                          first.__class__.__name__, first)
             content = await _chat_completion(base_url, model, api_key, timeout, prompt)
-            return _parse_draft(content, critical_flags, finding_terms, grounding=prompt)
+            return _parse_draft(content, critical_flags, finding_terms, grounding=prompt,
+                                critical_keywords=critical_keywords,
+                                reject_unflagged_critical=reject_unflagged)
     except (httpx.InvalidURL, httpx.UnsupportedProtocol) as e:
         _log.warning("impression LLM draft skipped: unusable IMPRESSION_LLM_BASE_URL (%s)", e.__class__.__name__)
     except httpx.HTTPStatusError as e:

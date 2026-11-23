@@ -55,7 +55,11 @@ origin the #75 Caddy overlay serves. Nothing else is reachable off-box.
    compose-internal hop on a single-box deployment, where the traffic never leaves the docker
    bridge. The model itself stays a config value (`IMPRESSION_LLM_BASE_URL` +
    `IMPRESSION_LLM_MODEL`), so upgrading it is an env change, not a code change; unset keys
-   remain a legitimate mode and the deterministic template runs instead.
+   remain a legitimate mode and the deterministic template runs instead. A draft that asserts
+   a critical finding the flags do not contain is refused when it was written without a report
+   (pre-sign), and kept with a logged count when written from one, unless
+   `IMPRESSION_LLM_REJECT_UNFLAGGED_CRITICAL=1` (#141, a PI call: the model may have read a
+   finding the keyword scan missed).
 4. Accounts: each radiologist has their own OpenMRS user; the referring-physician demo account
    password is known; the ack/override phone is on wifi that can reach the demo origin.
 4a. Referring-physician access (#85) is bootstrapped, not hand-built: the

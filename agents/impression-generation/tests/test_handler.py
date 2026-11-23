@@ -128,6 +128,7 @@ def _reset_fhir():
 _LLM_ENV = (
     "IMPRESSION_LLM_BASE_URL", "IMPRESSION_LLM_MODEL",
     "IMPRESSION_LLM_API_KEY", "IMPRESSION_LLM_TIMEOUT_SECONDS",
+    "IMPRESSION_LLM_REJECT_UNFLAGGED_CRITICAL",
 )
 
 
@@ -314,3 +315,20 @@ async def test_llm_success_flows_into_handler_output_without_touching_critical_f
     # #78's deterministic derivation is untouched by an LLM draft being used.
     assert out["criticalFlags"] == [{"label": "pneumothorax", "severity": "critical"}]
     assert out["structuredFindings"] == [{"label": "pneumothorax", "severity": "critical"}]
+
+
+async def test_handler_checks_the_draft_against_the_table_the_flags_came_from():
+    """#141's check only runs when the keyword table reaches the parser. Pinned here because a
+    caller that stopped passing it would switch the check off with every other test still green."""
+    seen = {}
+
+    async def _spy(**kwargs):
+        seen.update(kwargs)
+        return None
+
+    handler.draft_impression = _spy
+    ai_findings = {"findings": [{"toolId": "pneumothorax-detect", "status": "COMPLETE",
+                                 "label": "Pneumothorax"}]}
+    await handle("impression.generate", {"studyContext": SAMPLE_CONTEXT, "aiFindings": ai_findings})
+    assert seen["critical_keywords"] is handler._CRITICAL_KEYWORDS
+
