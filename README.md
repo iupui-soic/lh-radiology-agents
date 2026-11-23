@@ -87,6 +87,7 @@ For the live A2A + Temporal wiring, install the app extras and pin the SDKs:
 | [`dicom-evidence-writeback.md`](docs/dicom-evidence-writeback.md) | Safety case for writing AI evidence back into Orthanc |
 | [`ohif-integration-approach.md`](docs/ohif-integration-approach.md) | OHIF integration decision record |
 | [`embed-mammography-mapping.md`](docs/embed-mammography-mapping.md) | EMBED mammography mapping spike (M5 groundwork) |
+| [`ehr-llm-context-design.md`](docs/ehr-llm-context-design.md) | Design note: an LLM picks extra EHR reads per study, fixed packet as the floor (#138) |
 
 ## Ownership
 See the [Ownership table in `CLAUDE.md`](./CLAUDE.md#ownership) for who owns which
