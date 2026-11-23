@@ -25,4 +25,11 @@ def validate_against(payload: dict[str, Any], schema_path: Path) -> None:
 
 
 def validate_skill_output(skill_id: str, payload: dict[str, Any]) -> None:
-    validate_against(payload, paths.skill_schema(skill_id))
+    schema_path = paths.skill_schema(skill_id)
+    if not schema_path.is_file():
+        # A typo'd skill id would otherwise surface as a bare FileNotFoundError from _load (#46).
+        known = sorted({p.name.split(".", 1)[0] for p in schema_path.parent.glob("*.schema.json")})
+        raise ContractError(
+            f"no contract schema for skill {skill_id!r}; known skill domains: {', '.join(known)}"
+        )
+    validate_against(payload, schema_path)
