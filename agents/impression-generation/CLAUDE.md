@@ -23,6 +23,10 @@ output — just consume the inputs you're given.
   failure/timeout/misconfiguration falls back to the deterministic template.
 - `criticalFlags` (and `structuredFindings`) stay a deterministic derivation always — never
   influenced by the LLM path; see #78. Report Verification keys on `criticalFlags`.
+- **#140 (off by default, a PI decision):** with `IMPRESSION_SIGNED_NEGATION_CLEARS_AI_FLAG=1`, a
+  critical flag that only an AI label raised is cleared post-sign when the signed report explicitly
+  negates it (a rule-out query or silence never counts). The cleared finding stays in
+  `structuredFindings` with `severity: "discordant"`. Unset keeps the AI flag, as today.
 
 ## Data deps
 Inputs are passed in (`report`, `ehrContext`, `aiFindings`); fetch priors from `fhir2` if needed.

@@ -527,6 +527,10 @@ services:
       # posture as the orchestrator's FHIR2_ALLOW_INSECURE_WRITE note; a real deployment uses an
       # https FHIR2_BASE_URL instead). READ, not WRITE: this service never writes.
       FHIR2_ALLOW_INSECURE_READ: "1"
+      # #140, a PI decision, so unset (today's behaviour) by default: when set, a critical flag ONLY
+      # the AI raised is cleared post-sign if the signed report explicitly negates that finding, so
+      # it neither holds the sign-off gate nor pages Cat1. The case is kept as a "discordant" entry.
+      IMPRESSION_SIGNED_NEGATION_CLEARS_AI_FLAG: ${IMPRESSION_SIGNED_NEGATION_CLEARS_AI_FLAG:-}
       # LLM-authored impressions (#77). Pass-throughs only, all defaulting to empty (= off), so
       # an unset deployment keeps the deterministic template exactly as before. llm_draft.py
       # needs BOTH base URL and model before it will attempt the LLM path at all. Without these

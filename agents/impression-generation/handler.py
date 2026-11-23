@@ -28,6 +28,8 @@ is never the LLM's call (see #78).
 """
 from __future__ import annotations
 import logging
+import os
+import re
 
 from radagent_common.fhir_client import Fhir2Client
 from radagent_common.negation import find_asserted_terms, scannable_text
@@ -35,7 +37,7 @@ from radagent_common.tracing import now_iso
 
 from llm_draft import draft_impression
 
-AGENT_VERSION = "0.4.0"
+AGENT_VERSION = "0.5.0"
 _log = logging.getLogger(__name__)
 
 # Read-only fhir2 client for report-content lookup (#16). Lazily built so importing this module
@@ -63,6 +65,40 @@ _CRITICAL_KEYWORDS: dict[str, str] = {
     "mass":        "mass lesion",
     "tumor":       "neoplasm",
 }
+
+
+# #140, OFF by default: may the radiologist's signed report clear a critical flag that only the AI
+# raised? Today it cannot (each signal is scanned separately, #78), so an AI false positive the
+# radiologist rejected ("No pneumothorax.") still holds the sign-off gate and then pages the
+# ordering physician as Cat1. Whether the signed read should win is a PI decision (#140 lists the
+# options); this switch is option (a), and unset keeps today's behaviour (option c).
+_SIGNED_NEGATION_CLEARS_AI_FLAG = "IMPRESSION_SIGNED_NEGATION_CLEARS_AI_FLAG"
+
+
+def _signed_negation_clears_ai_flag() -> bool:
+    """Same truthy set as the LLM switches, so "0" or "false" never turns it on."""
+    return os.environ.get(_SIGNED_NEGATION_CLEARS_AI_FLAG, "").strip().lower() in {"1", "true", "yes"}
+
+
+# A rule-out is a QUESTION ("rule out pneumothorax"), not a statement that the finding is absent,
+# yet the shared scanner treats it as a negation cue (right for flagging: a query is not a finding).
+# Here that would let a query clear a flag, so it is neutralised before the check below.
+_RULE_OUT_QUERY = re.compile(r"\b(?:rule\s+out|ruled\s+out|r/o)\b", re.I)
+# The plural forms the shared scanner also matches, so "no pneumothoraces" is a mention.
+_MENTION_FORMS = {"pneumothorax": r"pneumothorax|pneumothoraces",
+                  "embolism": r"embolism|embolisms|emboli"}
+
+
+def _negated_by_report(report_scan: str, keyword: str) -> bool:
+    """Does the signed report's finding-bearing text NAME `keyword` and negate every mention?
+
+    Silence is not a negation: a report that never names the finding leaves the AI flag standing.
+    `report_scan` is scannable_text(conclusion), so a negation that sits only in the INDICATION or
+    HISTORY ("evaluate for pneumothorax") never counts either."""
+    body = _MENTION_FORMS.get(keyword, rf"{re.escape(keyword)}(?:e?s)?")
+    if not re.search(rf"\b(?:{body})\b", report_scan, re.I):
+        return False
+    return keyword not in find_asserted_terms(_RULE_OUT_QUERY.sub(" assess ", report_scan), [keyword])
 
 
 async def _report_conclusion(report: dict) -> str:
@@ -116,10 +152,29 @@ async def handle(skill_id: str, payload: dict) -> dict:
     #     negation in one can never bleed across and silence a positive in another;
     #   * word-boundary match, so "mass" never fires on "massive".
     finding_labels = _complete_finding_labels(ai_findings)
-    scan_texts = [scannable_text(conclusion)] + finding_labels
-    hits: set[str] = set()
-    for text in scan_texts:
-        hits |= set(find_asserted_terms(text, _CRITICAL_KEYWORDS))
+    report_scan = scannable_text(conclusion)
+    report_hits = set(find_asserted_terms(report_scan, _CRITICAL_KEYWORDS))
+    label_hits = [set(find_asserted_terms(label, _CRITICAL_KEYWORDS)) for label in finding_labels]
+    hits: set[str] = report_hits.union(*label_hits)
+
+    # #140 (off unless _SIGNED_NEGATION_CLEARS_AI_FLAG): post-sign, a flag only the AI raised is
+    # cleared when the signed report explicitly negates that finding. A flag the report itself
+    # asserts is never touched, and with no report text (pre-sign, or a failed fetch) nothing can be
+    # cleared. Never silent: each cleared flag stays in structuredFindings as a "discordant" entry.
+    cleared: set[str] = set()
+    if conclusion.strip() and _signed_negation_clears_ai_flag():
+        cleared = {keyword for keyword in set().union(*label_hits) - report_hits
+                   if _negated_by_report(report_scan, keyword)}
+        if cleared:
+            # A count only, never report text (the agent's logging discipline).
+            _log.warning("signed report negates %d AI-only critical flag(s); cleared under %s (#140)",
+                         len(cleared), _SIGNED_NEGATION_CLEARS_AI_FLAG)
+        hits -= cleared
+        # The screening label behind a cleared flag must not reach the draft either: the prompt would
+        # call it a confirmed finding the prose MUST assert, and the template would recite it.
+        finding_labels = [label for label, found in zip(finding_labels, label_hits)
+                          if not (found and found <= cleared)]
+
     critical_flags = [
         {"label": label, "severity": "critical"}
         for keyword, label in _CRITICAL_KEYWORDS.items()
@@ -129,6 +184,11 @@ async def handle(skill_id: str, payload: dict) -> dict:
     structured_findings = [
         {"label": flag["label"], "severity": flag["severity"]}
         for flag in critical_flags
+    ] + [
+        {"label": label, "severity": "discordant", "source": "ai-screening",
+         "note": "AI screening finding that the signed report negates; critical flag cleared (#140)"}
+        for keyword, label in _CRITICAL_KEYWORDS.items()
+        if keyword in cleared
     ]
 
     # #77: LLM-authored prose when IMPRESSION_LLM_BASE_URL/MODEL are configured; unset (the
