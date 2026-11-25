@@ -575,14 +575,16 @@ if tracing_enabled():
 
 @app.get("/healthz")
 async def healthz(request: Request):
-    """Healthy only while the RIS poller runs (#48): a dead poller means sign-offs go undetected,
-    so it answers 503 rather than a green that hides it. With no poller at all (the app served
-    without its lifespan, as some tests do) there is nothing to report on."""
+    """Healthy only while the RIS poller runs (#48): a poller that is gone, whether it raised
+    ("crashed") or returned ("stopped"), means sign-offs go undetected, so it answers 503 rather
+    than a green that hides it. With no poller at all (the app served without its lifespan, as
+    some tests do) there is nothing to report on."""
     poller = getattr(request.app.state, "poller", None)
     if poller is None:
         return {"ok": True, "poller": "not started"}
     if poller.done():
-        return JSONResponse({"ok": False, "poller": "crashed"}, status_code=503)
+        crashed = not poller.cancelled() and poller.exception() is not None
+        return JSONResponse({"ok": False, "poller": "crashed" if crashed else "stopped"}, status_code=503)
     return {"ok": True, "poller": "running"}
 
 

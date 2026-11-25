@@ -53,6 +53,19 @@ def test_a_crashed_poller_turns_healthz_503_and_is_logged_with_its_traceback(mon
     assert "RuntimeError: ingress store unavailable" in logged
 
 
+def test_a_poller_that_returns_reports_stopped_not_crashed(monkeypatch, caplog):
+    async def returns():
+        return None
+
+    monkeypatch.setattr(ingress, "_ris_poller", returns)
+    with caplog.at_level(logging.ERROR, logger="orchestrator.ingress"):
+        with TestClient(ingress.app) as client:
+            r = _health_when(client, "stopped")
+    assert r.status_code == 503
+    assert r.json() == {"ok": False, "poller": "stopped"}
+    assert "RIS poller exited" in caplog.text
+
+
 def test_the_logged_traceback_masks_credentials_in_a_url(monkeypatch, caplog):
     async def crashes():
         raise RuntimeError("401 for url 'http://admin:s3cret@fhir2:8080/openmrs/ws/fhir2/R4'")
