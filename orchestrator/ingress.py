@@ -12,6 +12,7 @@ import html as html_mod
 import logging
 import os
 import re
+import traceback
 from contextlib import asynccontextmanager
 from urllib.parse import parse_qs
 
@@ -530,8 +531,27 @@ async def lifespan(app: FastAPI):
     # masquerade as an fhir2 outage forever â€" startup is the only place it can be loud.
     Fhir2Client()
     poller = asyncio.create_task(_ris_poller())
+    poller.add_done_callback(_poller_done)
+    app.state.poller = poller  # /healthz reads it (#48)
     yield
     poller.cancel()
+    app.state.poller = None
+
+
+def _poller_done(task: asyncio.Task) -> None:
+    """Log the poller's end unless it was cancelled at shutdown (#48). An exception escaping
+    _ris_poller (the store failing at startup, say) would otherwise die with the task unseen.
+    The traceback goes through the same userinfo masking as the poll warnings: its last line is
+    str(exc), and an fhir2 HTTPStatusError carries the request URL."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is None:
+        _log.error("RIS poller exited; sign-off detection is stopped until the ingress restarts")
+        return
+    trace = _USERINFO_RE.sub("://***@", "".join(traceback.format_exception(exc)))
+    _log.error("RIS poller crashed; sign-off detection is stopped until the ingress restarts\n%s",
+               trace.rstrip())
 
 
 app = FastAPI(title="LH-Radiology Orchestrator Ingress", lifespan=lifespan)
@@ -554,8 +574,18 @@ if tracing_enabled():
 
 
 @app.get("/healthz")
-async def healthz() -> dict:
-    return {"ok": True}
+async def healthz(request: Request):
+    """Healthy only while the RIS poller runs (#48): a poller that is gone, whether it raised
+    ("crashed") or returned ("stopped"), means sign-offs go undetected, so it answers 503 rather
+    than a green that hides it. With no poller at all (the app served without its lifespan, as
+    some tests do) there is nothing to report on."""
+    poller = getattr(request.app.state, "poller", None)
+    if poller is None:
+        return {"ok": True, "poller": "not started"}
+    if poller.done():
+        crashed = not poller.cancelled() and poller.exception() is not None
+        return JSONResponse({"ok": False, "poller": "crashed" if crashed else "stopped"}, status_code=503)
+    return {"ok": True, "poller": "running"}
 
 
 @app.post("/webhooks/ris/event", status_code=202)
