@@ -144,7 +144,8 @@ class CommsLedgerClient:
 
     async def complete_ack_task(self, resource_id: str, *, acknowledged_by: str,
                                 at_iso: str, on_behalf_of: str | None = None,
-                                late_deadline_iso: str | None = None) -> Task:
+                                late_deadline_iso: str | None = None,
+                                disposition: str | None = None) -> Task:
         """Close the loop AND say who closed it (#79's explicit ack): a FHIR Annotation on
         `Task.note` naming the authenticated acknowledger, and status -> COMPLETED unless the loop
         already terminated. The note is the audit fact the plain status flip cannot carry —
@@ -158,6 +159,11 @@ class CommsLedgerClient:
 
         `late_deadline_iso` (#128): set when the ack arrives after `restriction.period.end`. The
         note then records the lateness AND the deadline it missed.
+
+        `disposition` (#139): what the acknowledger says has been done so far, as the code the ack
+        page validated. It only adds to the note and never touches the status, so every answer
+        closes the loop the same way. None means no answer was recorded, and the note then says
+        nothing about action.
 
         STATUS RULE, and the reason this method no longer just assigns COMPLETED: a Task the
         escalation already marked FAILED keeps that status. FAILED is the record that nobody
@@ -177,6 +183,8 @@ class CommsLedgerClient:
             text = f"acknowledged by {acknowledged_by}"
         if on_behalf_of:
             text = f"{text} (on behalf of {on_behalf_of})"
+        if disposition:
+            text = f"{text}; disposition: {disposition}"
         task.note = list(task.note) + [{"text": text, "time": at_iso}]
         return Task.model_validate(await self._put(f"Task/{resource_id}", _dump(task)))
 

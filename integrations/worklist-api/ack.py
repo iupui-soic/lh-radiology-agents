@@ -21,12 +21,12 @@ in a deliberate order:
    A cookie that no longer resolves to an authenticated session falls through to the Basic
    challenge rather than failing: stale sessions are routine, not suspicious.
 3. **The acknowledgement is a deliberate act, so it is a POST.** `GET /ack/{id}` renders a
-   confirmation page and changes nothing; the button on it POSTs. Once identity can come from
+   confirmation page and changes nothing; a button on it POSTs. Once identity can come from
    an ambient cookie (a above), a GET that acknowledged would be reachable without any human
    act at all -- browsers prefetch on hover and refetch on tab restore, either of which would
    close the escalation clock with a physician's name on it. Under Basic alone that was
    impossible, because a prefetch carries no credentials. The physician still makes exactly
-   one click; it is just a click on a button that says what it will attest.
+   one click, and the page says what that click will attest.
 4. **The ledger Task closes with WHO on it** (`complete_ack_task`: status COMPLETED + a note
    naming the acknowledger). `comms.checkAck` then reports COMPLETED and the orchestrator's
    escalation never fires, which is the run-book's "acknowledged in time" arc.
@@ -38,7 +38,7 @@ in a deliberate order:
    * **Non-addressee**: permitted, because covering physicians, night float and handover are
      normal and refusing them would push people to acknowledge from a colleague's logged-in
      browser. Recorded as on-behalf-of, naming BOTH parties, and the confirmation page says so
-     before the button is pressed. Compared on the PROVIDER uuid (`session.currentProvider`), and
+     before a button is pressed. Compared on the PROVIDER uuid (`session.currentProvider`), and
      an unresolvable provider is never treated as a mismatch, see `Caller`. The addressee is
      NAMED by a best-effort `/provider/<uuid>` read made as the caller, because the live
      `Task.owner` carries no display and a uuid is not something a covering physician can check
@@ -49,8 +49,17 @@ in a deliberate order:
      Task is deliberately left open for on-call to close themselves. The page no longer claims
      the escalation clock is closed when it is not, which is what made the live reproduction
      misleading rather than merely wrong.
+6. **The tap also says what has been done so far** (#139). Acknowledging is not acting: a physician
+   can attest they saw a result and do nothing about it, and the record could not tell the two
+   apart. So each button on the page is one answer, and its code goes on the same `Task.note` as
+   WHO. This is RECORDED, not read: `comms.checkAck` reads only the Task's status, so every answer
+   closes the escalation clock exactly as the single button did, "seen, action pending" included.
+   The follow-up check (#139 step 2, on only when FOLLOWUP_CHECK_HOURS is set) runs after any
+   acknowledgement and does not read the answer either, so whether a reminder follows depends on
+   the deployment and on the chart, not on the button. The result page therefore promises no
+   reminder after "seen, action pending" and asks for the follow-up to go in the chart.
 
-Still ONE tap on a paged phone: the link opens the confirmation page, and the button on it is
+Still ONE tap on a paged phone: the link opens the confirmation page, and a button on it is
 the tap. What the split buys is that everything which is not a tap (a prefetch, a tab restore,
 a link-previewing mail client, a security scanner) now lands on a page instead of writing an
 attestation. Re-tapping is idempotent either way: an already-acknowledged Task renders the
@@ -67,7 +76,7 @@ import html
 import logging
 from datetime import datetime, timezone
 from typing import NamedTuple
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -81,6 +90,26 @@ from radagent_common.tracing import now_iso
 _log = logging.getLogger("worklist-api.ack")
 
 _ACKED = (TaskStatus.COMPLETED, TaskStatus.ACCEPTED)
+
+# The answers the page offers (#139): code -> button label, in page order. The code is what goes on
+# the ledger note, so a label can be reworded without changing the record's vocabulary.
+#
+# "Seen, action pending" comes FIRST on purpose. A physician usually acknowledges before acting, so
+# it is the honest answer at the moment of the tap, and the button a hurried thumb lands on must
+# not be a claim that the patient was contacted.
+_PENDING = "seen-action-pending"
+_DISPOSITIONS: dict[str, str] = {
+    _PENDING: "Seen, action pending",
+    "patient-contacted": "Patient contacted",
+    "test-or-treatment-ordered": "Test or treatment ordered",
+    "follow-up-scheduled": "Follow-up scheduled",
+    # A real answer, not a gap in care: the result was expected and is already being managed. It
+    # gets its own button so the record can tell it apart. The follow-up check (#139 step 2, on
+    # only when FOLLOWUP_CHECK_HOURS is set) does not read the answer yet, so it can still remind
+    # after this one.
+    "already-known-no-action-needed": "Already known, no action needed",
+    "other": "Other",
+}
 
 
 class Caller(NamedTuple):
@@ -216,7 +245,8 @@ def _page(title: str, lines: list[str]) -> HTMLResponse:
     return HTMLResponse(
         f"<!doctype html><html><head><meta name=\"viewport\" "
         f"content=\"width=device-width, initial-scale=1\"><title>{html.escape(title)}</title>"
-        f"</head><body style=\"font-family: sans-serif; max-width: 30em; margin: 3em auto;\">"
+        f"</head><body style=\"font-family: sans-serif; max-width: 30em; margin: 3em auto; "
+        f"padding: 0 1em;\">"
         f"<h1 style=\"font-size:1.2em\">{html.escape(title)}</h1>{body}</body></html>"
     )
 
@@ -301,7 +331,7 @@ def _confirm_page(task_id: str, sig: str, who: str, finding: str | None,
     """The GET page: says what is about to be attested, who it will be attributed to, and what is
     irregular about it.
 
-    The button POSTs, which is the whole point of the split -- see `acknowledge` below.
+    The buttons POST, which is the whole point of the split -- see `acknowledge` below.
     """
     # Query-only action: resolves against the page's OWN url, so it keeps the path whatever
     # prefix served it and carries the signature forward.
@@ -324,11 +354,11 @@ def _confirm_page(task_id: str, sig: str, who: str, finding: str | None,
             f"<p>This result was sent to <strong>{html.escape(anomaly.on_behalf_of)}</strong>. "
             f"You are signed in as <strong>{html.escape(who)}</strong>, so it will be recorded as "
             f"acknowledged on their behalf by you.</p>")
-        button = "Acknowledge on their behalf"
+        act = "Acknowledge on their behalf"
     else:
         attribution = (f"<p>This will be recorded as acknowledged by "
                        f"<strong>{html.escape(who)}</strong>.</p>")
-        button = "Acknowledge"
+        act = "Acknowledge"
 
     if anomaly.late_deadline_iso:
         # NOT "closes the escalation clock". The old page said that unconditionally, which is how
@@ -339,22 +369,49 @@ def _confirm_page(task_id: str, sig: str, who: str, finding: str | None,
             f"<p>The acknowledgement window for this result closed at "
             f"<strong>{html.escape(anomaly.late_deadline_iso)}</strong>. Your acknowledgement "
             f"will be recorded as <strong>late</strong>.{paged}</p>")
-        button = "Record late acknowledgement"
+        act = "Record late acknowledgement"
     else:
         timing = ("<p>This closes the care team's escalation clock for this result.</p>")
+
+    # One button per answer, all in the one form, so the tap that attests is also the answer (#139)
+    # and the acknowledgement stays one tap. Every submit carries a name and a value: a button
+    # without them would attest while recording nothing about action.
+    buttons = "".join(
+        f"<button type=\"submit\" name=\"disposition\" value=\"{html.escape(code)}\" "
+        f"style=\"display:block; width:100%; box-sizing:border-box; margin:0.5em 0; "
+        f"font-size:1.1em; padding:0.7em 1.2em;\">{html.escape(label)}</button>"
+        for code, label in _DISPOSITIONS.items())
 
     return HTMLResponse(
         f"<!doctype html><html><head><meta name=\"viewport\" "
         f"content=\"width=device-width, initial-scale=1\">"
         f"<title>Acknowledge critical result</title></head>"
-        f"<body style=\"font-family: sans-serif; max-width: 30em; margin: 3em auto;\">"
+        f"<body style=\"font-family: sans-serif; max-width: 30em; margin: 3em auto; "
+        f"padding: 0 1em;\">"
         f"<h1 style=\"font-size:1.2em\">Acknowledge critical result</h1>"
         + (f"<p>Finding: {html.escape(finding)}</p>" if finding else "")
         + attribution + timing
-        + f"<form method=\"post\" action=\"{html.escape(action)}\">"
-          f"<button type=\"submit\" style=\"font-size:1.1em; padding:0.6em 1.2em;\">"
-          f"{html.escape(button)}</button></form></body></html>"
+        + f"<p><strong>{html.escape(act)}</strong> by choosing what has been done so far:</p>"
+        + f"<form method=\"post\" action=\"{html.escape(action)}\">{buttons}</form></body></html>"
     )
+
+
+async def _submitted_disposition(request: Request) -> str | None:
+    """The code the pressed button submitted, or None when there is no answer we recognise.
+
+    Never a reason to refuse. A page left open across a deploy, or any client that posts no answer,
+    is still a physician acknowledging a critical result, and refusing them would leave the
+    escalation clock running against someone acting in good faith. So the ack lands either way and
+    the note simply says nothing about action. Only a code from `_DISPOSITIONS` ever reaches the
+    ledger, so nothing a client typed can be written into the record.
+
+    Parsed with the stdlib, not request.form(), for the same reason as the sign-off override form
+    in orchestrator/ingress.py: starlette delegates all form parsing to the optional
+    python-multipart package, which this image does not install.
+    """
+    raw = (await request.body()).decode("utf-8", errors="replace")
+    code = parse_qs(raw).get("disposition", [""])[0]
+    return code if code in _DISPOSITIONS else None
 
 
 def create_ack_router(ledger, identity: OpenmrsIdentity) -> APIRouter:
@@ -436,7 +493,9 @@ def create_ack_router(ledger, identity: OpenmrsIdentity) -> APIRouter:
     def _already(finding: str | None) -> HTMLResponse:
         return _page("Already acknowledged", [
             f"Finding: {finding}" if finding else "",
-            "This critical result was already acknowledged; nothing further is needed.",
+            # NOT "nothing further is needed": an acknowledgement is not an action (#139), and the
+            # earlier answer may well have been "seen, action pending".
+            "This critical result was already acknowledged; no further acknowledgement is needed.",
         ])
 
     @router.get("/ack/{task_id}")
@@ -449,7 +508,7 @@ def create_ack_router(ledger, identity: OpenmrsIdentity) -> APIRouter:
         and refetch on tab restore, and either would silently close the escalation clock with
         a physician's name on it. Under the older Basic-only flow that could not happen,
         because a prefetch carries no credentials. So the state change moved to POST and this
-        GET only asks. The click on the button is still the only click the physician makes.
+        GET only asks. The click on a button is still the only click the physician makes.
         """
         caller, proof, early = await _resolve_caller(task_id, request, sig)
         if early is not None:
@@ -462,7 +521,7 @@ def create_ack_router(ledger, identity: OpenmrsIdentity) -> APIRouter:
 
     @router.post("/ack/{task_id}")
     async def acknowledge(task_id: str, request: Request, sig: str = "") -> Response:
-        """The state change: submitted from the confirmation page's button."""
+        """The state change: submitted from one of the confirmation page's buttons."""
         caller, proof, early = await _resolve_caller(task_id, request, sig)
         if early is not None:
             return early
@@ -471,13 +530,16 @@ def create_ack_router(ledger, identity: OpenmrsIdentity) -> APIRouter:
             return _already(finding)
 
         anomaly = await _named(task, caller, proof)
+        disposition = await _submitted_disposition(request)
         await ledger.complete_ack_task(
             task_id, acknowledged_by=caller.who, at_iso=now_iso(),
             on_behalf_of=anomaly.on_behalf_of,
-            late_deadline_iso=anomaly.late_deadline_iso)
-        _log.info("ack task %s acknowledged by %s (on_behalf_of=%s late=%s escalated=%s)",
+            late_deadline_iso=anomaly.late_deadline_iso,
+            disposition=disposition)
+        _log.info("ack task %s acknowledged by %s (on_behalf_of=%s late=%s escalated=%s "
+                  "disposition=%s)",
                   task_id, caller.who, anomaly.on_behalf_of,
-                  bool(anomaly.late_deadline_iso), anomaly.escalated)
+                  bool(anomaly.late_deadline_iso), anomaly.escalated, disposition)
 
         # The result page mirrors the confirmation page's claims, so a screenshot of either tells
         # the same story. It must never assert the clock is closed when an escalation is running.
@@ -494,10 +556,20 @@ def create_ack_router(ledger, identity: OpenmrsIdentity) -> APIRouter:
                             "this acknowledgement does not stand them down.")
         else:
             closing = "The care team's escalation clock for this result is now closed."
+        # Said out loud because the button could suggest otherwise. No reminder is promised: the
+        # follow-up check (#139 step 2) is a deployment switch, does not read this answer, and
+        # reminds the ordering physician, who may not be the one tapping (a covering physician).
+        # So the page asks for the follow-up to be recorded in the chart, which is where that
+        # check looks. Not said after an escalation, where on-call remains responsible and the
+        # line above says so.
+        no_reminder = ("Do not count on a reminder: record the follow-up in the chart."
+                       if disposition == _PENDING and not anomaly.escalated else "")
         return _page("Critical result acknowledged", [
             f"Finding: {finding}" if finding else "",
             attribution,
+            f"Status recorded: {_DISPOSITIONS[disposition]}." if disposition else "",
             closing,
+            no_reminder,
         ])
 
     return router

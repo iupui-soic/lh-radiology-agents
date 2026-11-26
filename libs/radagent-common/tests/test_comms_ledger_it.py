@@ -171,6 +171,26 @@ def test_update_task_status_preserves_focus_owner_and_the_ack_deadline(ledger, c
     assert after.restriction.period.end == deadline, "the ack deadline changed"
 
 
+@live
+def test_the_ack_disposition_round_trips_on_a_real_ledger(ledger, case):
+    """#139: the ack page's answer rides on the Task.note entry that names who acknowledged. The
+    mocked tests prove the text we build; this proves a real HAPI keeps the note (an Annotation
+    with text + time) through the read-modify-write PUT, and that the loop closes as before."""
+    _, created = _open_loop(ledger, case)
+    at = datetime.now(timezone.utc).isoformat()
+
+    asyncio.run(ledger.complete_ack_task(
+        created.id, acknowledged_by=f"Practitioner/{case['practitioner']}", at_iso=at,
+        disposition="patient-contacted"))
+
+    after = asyncio.run(ledger.get_task(created.id))
+    assert after.status == TaskStatus.COMPLETED
+    texts = [n.get("text") if isinstance(n, dict) else getattr(n, "text", None) for n in after.note]
+    assert any(t and "acknowledged by" in t and t.endswith("; disposition: patient-contacted")
+               for t in texts), texts
+    assert after.restriction.period.end == created.restriction.period.end, "deadline changed"
+
+
 # --- 4. the searches that silently returned nothing -----------------------------------
 
 

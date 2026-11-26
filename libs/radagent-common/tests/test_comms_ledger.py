@@ -388,3 +388,29 @@ def test_an_ordinary_ack_note_is_unchanged():
         "task-1", acknowledged_by="Dr A (uuid-a)", at_iso="2026-08-23T19:14:00+00:00"))
     assert put["body"]["status"] == "completed"
     assert put["body"]["note"][0]["text"] == "acknowledged by Dr A (uuid-a)"
+
+
+def test_the_disposition_goes_on_the_note_beside_who():
+    """#139: what the acknowledger says has been done so far joins the audit note. It never touches
+    the status, so even "seen, action pending" closes the loop the way every ack does."""
+    client, put = _ack_rig(TaskStatus.REQUESTED)
+    updated = asyncio.run(client.complete_ack_task(
+        "task-1", acknowledged_by="Dr A (uuid-a)", at_iso="2026-11-03T19:14:00+00:00",
+        disposition="seen-action-pending"))
+    assert updated.status is TaskStatus.COMPLETED
+    assert put["body"]["note"][0] == {
+        "text": "acknowledged by Dr A (uuid-a); disposition: seen-action-pending",
+        "time": "2026-11-03T19:14:00+00:00"}
+
+
+def test_the_disposition_follows_the_late_and_delegated_wording():
+    """All three facts on the one note, and an answer never erases the lapse (#128)."""
+    client, put = _ack_rig(TaskStatus.FAILED)
+    updated = asyncio.run(client.complete_ack_task(
+        "task-1", acknowledged_by="Dr B (uuid-b)", at_iso="2026-11-03T19:14:00+00:00",
+        on_behalf_of="Dr A", late_deadline_iso="2026-08-23T19:03:06+00:00",
+        disposition="patient-contacted"))
+    assert updated.status is TaskStatus.FAILED
+    assert put["body"]["note"][0]["text"] == (
+        "late acknowledgement by Dr B (uuid-b); deadline was 2026-08-23T19:03:06+00:00 "
+        "(on behalf of Dr A); disposition: patient-contacted")
