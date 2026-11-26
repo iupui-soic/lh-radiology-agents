@@ -819,13 +819,15 @@ def test_the_answer_travels_with_a_delegated_late_escalated_ack(monkeypatch):
 
 
 @pytest.mark.parametrize("task_kwargs", [{}, {"deadline": _PAST}], ids=["in-time", "late"])
-def test_pending_says_no_reminder_will_be_sent(monkeypatch, task_kwargs):
-    """Nothing tracks a pending action yet, and the button could suggest otherwise. A physician who
-    assumes the system will chase it is the failure #139 exists to prevent."""
+def test_pending_says_not_to_count_on_a_reminder(monkeypatch, task_kwargs):
+    """Whether a reminder follows depends on a deployment switch and on the chart (#139 step 2), not
+    on the button, and it goes to the ordering physician, who may not be the one tapping. A
+    physician who assumes the system will chase a pending action is the failure #139 exists to
+    prevent."""
     monkeypatch.setenv("CRITCOM_ACK_HMAC_SECRET", _SECRET)
     client, _, _ident = _rig_for(_addressed_task(**task_kwargs))
     body = html_mod.unescape(_press(client, "seen-action-pending").text)
-    assert "No reminder will be sent: the follow-up stays with you." in body
+    assert "Do not count on a reminder: record the follow-up in the chart." in body
 
 
 @pytest.mark.parametrize("code", [code for code, _ in _ANSWERS if code != "seen-action-pending"])
@@ -836,13 +838,13 @@ def test_only_pending_talks_about_reminders(monkeypatch, code):
 
 
 def test_pending_after_an_escalation_leaves_responsibility_with_on_call(monkeypatch):
-    """"The follow-up stays with you" would contradict the line above it: on-call was paged and
-    remains responsible."""
+    """The reminder line would contradict the line above it: on-call was paged and remains
+    responsible."""
     monkeypatch.setenv("CRITCOM_ACK_HMAC_SECRET", _SECRET)
     client, _, _ident = _rig_for(_addressed_task(deadline=_PAST, status=TaskStatus.FAILED))
     body = html_mod.unescape(_press(client, "seen-action-pending").text)
     assert "remains responsible" in body
-    assert "stays with you" not in body
+    assert "Do not count on a reminder" not in body
 
 
 def test_a_second_tap_cannot_change_the_recorded_answer(monkeypatch):

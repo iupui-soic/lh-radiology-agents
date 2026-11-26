@@ -194,9 +194,12 @@ origin the #75 Caddy overlay serves. Nothing else is reachable off-box.
    to, and only a button on it attests. Each button is one answer to what has been done so far
    (**Seen, action pending**, **Patient contacted**, **Test or treatment ordered**,
    **Follow-up scheduled**, **Already known, no action needed**, **Other**; #139), recorded on the
-   ledger Task's note beside who acknowledged. Every answer closes the clock the same way, and nothing tracks a pending action
-   yet. Opening the link never acknowledges anything, so a preloading browser, a restored tab or
-   a scanner cannot attest on the physician's behalf. Re-tap: idempotent.
+   ledger Task's note beside who acknowledged. Every answer closes the clock the same way, and
+   nothing reads the answer yet: the follow-up check (#139 step 2, on only when
+   `FOLLOWUP_CHECK_HOURS` is set) runs after any acknowledgement, whatever the answer. After
+   **Seen, action pending** the page says not to count on a reminder and to record the follow-up
+   in the chart. Opening the link never acknowledges anything, so a preloading browser, a
+   restored tab or a scanner cannot attest on the physician's behalf. Re-tap: idempotent.
    - **Identity comes first, and how depends on the route.** The signature is checked before
      any credential is solicited, so a forged link 403s without ever prompting. Then, if the
      browser sends a live OpenMRS `JSESSIONID`, the page is one click with no login. It only

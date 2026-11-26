@@ -52,10 +52,12 @@ in a deliberate order:
 6. **The tap also says what has been done so far** (#139). Acknowledging is not acting: a physician
    can attest they saw a result and do nothing about it, and the record could not tell the two
    apart. So each button on the page is one answer, and its code goes on the same `Task.note` as
-   WHO. This is RECORDED, not acted on. `comms.checkAck` reads only the Task's status, so every
-   answer closes the escalation clock exactly as the single button did, "seen, action pending"
-   included, and the result page says so. Checking that the action really happened is the later
-   half of #139, and it needs a PI decision on the window and on what counts as action.
+   WHO. This is RECORDED, not read: `comms.checkAck` reads only the Task's status, so every answer
+   closes the escalation clock exactly as the single button did, "seen, action pending" included.
+   The follow-up check (#139 step 2, on only when FOLLOWUP_CHECK_HOURS is set) runs after any
+   acknowledgement and does not read the answer either, so whether a reminder follows depends on
+   the deployment and on the chart, not on the button. The result page therefore promises no
+   reminder after "seen, action pending" and asks for the follow-up to go in the chart.
 
 Still ONE tap on a paged phone: the link opens the confirmation page, and a button on it is
 the tap. What the split buys is that everything which is not a tap (a prefetch, a tab restore,
@@ -102,7 +104,9 @@ _DISPOSITIONS: dict[str, str] = {
     "test-or-treatment-ordered": "Test or treatment ordered",
     "follow-up-scheduled": "Follow-up scheduled",
     # A real answer, not a gap in care: the result was expected and is already being managed. It
-    # gets its own button so a check that the action happened never chases these.
+    # gets its own button so the record can tell it apart. The follow-up check (#139 step 2, on
+    # only when FOLLOWUP_CHECK_HOURS is set) does not read the answer yet, so it can still remind
+    # after this one.
     "already-known-no-action-needed": "Already known, no action needed",
     "other": "Other",
 }
@@ -552,10 +556,13 @@ def create_ack_router(ledger, identity: OpenmrsIdentity) -> APIRouter:
                             "this acknowledgement does not stand them down.")
         else:
             closing = "The care team's escalation clock for this result is now closed."
-        # Said out loud because the button could suggest otherwise: nothing tracks a pending action
-        # yet (#139's later half), so the physician must not assume the system will chase it. Not
-        # said after an escalation, where on-call remains responsible and the line above says so.
-        no_reminder = ("No reminder will be sent: the follow-up stays with you."
+        # Said out loud because the button could suggest otherwise. No reminder is promised: the
+        # follow-up check (#139 step 2) is a deployment switch, does not read this answer, and
+        # reminds the ordering physician, who may not be the one tapping (a covering physician).
+        # So the page asks for the follow-up to be recorded in the chart, which is where that
+        # check looks. Not said after an escalation, where on-call remains responsible and the
+        # line above says so.
+        no_reminder = ("Do not count on a reminder: record the follow-up in the chart."
                        if disposition == _PENDING and not anomaly.escalated else "")
         return _page("Critical result acknowledged", [
             f"Finding: {finding}" if finding else "",
